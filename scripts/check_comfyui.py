@@ -12,6 +12,7 @@ from config import (
     COMFYUI_BASE_URL,
     COMFYUI_FL2VA_MODEL,
     COMFYUI_REF2VA_MODEL,
+    COMFYUI_SPECTRUM_ENABLED,
     COMFYUI_TEXT_ENCODER,
     COMFYUI_TIMEOUT,
     COMFYUI_VIDEO_VAE,
@@ -29,6 +30,9 @@ REQUIRED_NODES = {
     "CreateVideo",
     "SaveVideo",
 }
+# 采样加速节点仅在 comfyui.spectrum_apply.enabled=true 时才被工作流引用。
+if COMFYUI_SPECTRUM_ENABLED:
+    REQUIRED_NODES.add("SpectrumApplyMiniMaxH3")
 REQUIRED_MODELS = {
     "diffusion_models": {
         COMFYUI_FL2VA_MODEL,

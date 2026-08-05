@@ -49,7 +49,7 @@ flowchart LR
     App -->|"Protected media proxy"| Client
 ```
 
-浏览器只保存自己创建的不可预测任务 ID。任务列表接口必须显式提交这些 ID，不会枚举服务端全局历史。
+浏览器只保存自己创建的不可预测任务 ID。任务列表接口必须显式提交这些 ID，不会枚举服务端全局历史；唯一例外是管理员（`X-Admin-Key`）可以查看全部任务历史。
 
 ## 快速开始
 
@@ -100,13 +100,13 @@ python -B run.py
 
 ### 官方示例模型
 
-默认配置与当前官方 I2V、T2V、R2V 示例模板一致：扩散模型使用剪枝版 INT8 ConvRot，文本编码器使用 NVFP4 AWQ。
+默认配置与当前官方 I2V、T2V、R2V 示例模板一致：扩散模型使用剪枝版 INT8 ConvRot，文本编码器使用 INT8 ConvRot 版本（`qwen3vl_32b_minimax_h3_int8_convrot.safetensors`）。
 
 | 配置项 | 官方示例文件名 | ComfyUI 目录 |
 |---|---|---|
 | `fl2va_diffusion` | `minimax_h3_fl2va_pruned_int8_convrot.safetensors` | `models/diffusion_models/` |
 | `ref2va_diffusion` | `minimax_h3_ref2va_pruned_int8_convrot.safetensors` | `models/diffusion_models/` |
-| `text_encoder` | `qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors` | `models/text_encoders/` |
+| `text_encoder` | `qwen3vl_32b_minimax_h3_int8_convrot.safetensors` | `models/text_encoders/` |
 | `video_vae` | `minimax_h3_video_vae_fp16.safetensors` | `models/vae/` |
 | `audio_vae` | `minimax_h3_audio_vae_fp32.safetensors` | `models/vae/` |
 
@@ -118,7 +118,7 @@ ComfyUI/models/
 │  ├─ minimax_h3_fl2va_pruned_int8_convrot.safetensors
 │  └─ minimax_h3_ref2va_pruned_int8_convrot.safetensors
 ├─ text_encoders/
-│  └─ qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors
+│  └─ qwen3vl_32b_minimax_h3_int8_convrot.safetensors
 └─ vae/
    ├─ minimax_h3_video_vae_fp16.safetensors
    └─ minimax_h3_audio_vae_fp32.safetensors
@@ -131,6 +131,9 @@ MiniMaxH3ImageToVideo       MiniMaxH3ReferenceToVideo
 LoadImage / ImageScale     LoadVideo / GetVideoComponents
 LoadAudio                  CreateVideo / SaveVideo
 ```
+
+> [!NOTE]
+> 采样加速节点 **Spectrum Apply MiniMax H3**（`SpectrumApplyMiniMaxH3`，来自 [ComfyUI-Spectrum-MiniMax-H3](https://github.com/xmarre/ComfyUI-Spectrum-MiniMax-H3)）默认**不启用**。仅在 `comfyui.spectrum_apply.enabled: true` 时 FL2VA 与 Ref2VA 两条工作流才会串联该节点，此时 ComfyUI 必须安装上述自定义节点；关闭时工作流会完全移除该节点并直接回连模型加载器，**无需安装该依赖**。详见[采样加速](#采样加速spectrum)。
 
 启动 ComfyUI 后执行检查：
 
@@ -156,14 +159,20 @@ comfyui:
   models:
     fl2va_diffusion: "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
     ref2va_diffusion: "minimax_h3_ref2va_pruned_int8_convrot.safetensors"
-    text_encoder: "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
+    text_encoder: "qwen3vl_32b_minimax_h3_int8_convrot.safetensors"
     video_vae: "minimax_h3_video_vae_fp16.safetensors"
     audio_vae: "minimax_h3_audio_vae_fp32.safetensors"
+  # 采样加速（默认不启用）
+  spectrum_apply:
+    enabled: false
 
 llm:
   base_url: "http://127.0.0.1:8000/v1"
   api_key: ""
   model: "vision-model"
+
+ffmpeg:
+  path: ""  # ffmpeg.exe 绝对路径；留空则前端不提供 GIF 下载
 
 video:
   duration: {default: 5, min: 5, max: 15}
@@ -176,6 +185,20 @@ video:
 $env:VIDEO_SERVICE_CONFIG = 'D:\config\minimax-h3-studio.yml'
 ```
 
+> [!IMPORTANT]
+> **私密配置请写在 `config.local.yml`**（与 `config.yml` 同目录，已被 `.gitignore` 忽略，不会提交到版本库）。该文件会逐层合并覆盖 `config.yml`：API Key、本机 ffmpeg 路径、本机部署开关（如 `comfyui.spectrum_apply.enabled: true`）等都应放在这里。提交前请用 `git grep` 检查敏感信息（例如 `git grep -n "sk-\|api_key"`）。
+
+```yaml
+# config.local.yml 示例（不提交）
+llm:
+  api_key: "your-secret-key"
+ffmpeg:
+  path: "C:/path/to/ffmpeg.exe"
+comfyui:
+  spectrum_apply:
+    enabled: true
+```
+
 生产环境常用覆盖项：
 
 | 环境变量 | 用途 |
@@ -186,9 +209,11 @@ $env:VIDEO_SERVICE_CONFIG = 'D:\config\minimax-h3-studio.yml'
 | `COMFYUI_FL2VA_MODEL` / `COMFYUI_REF2VA_MODEL` | 两个扩散模型文件名 |
 | `COMFYUI_TEXT_ENCODER` | 文本编码器文件名 |
 | `COMFYUI_VIDEO_VAE` / `COMFYUI_AUDIO_VAE` | VAE 文件名 |
+| `COMFYUI_SPECTRUM_ENABLED` | 采样加速开关（true/false） |
+| `FFMPEG_PATH` | ffmpeg 可执行文件路径（GIF 转换） |
 | `VIDEO_DATA_FOLDER` / `ACCESS_DATA_FOLDER` | 运行时数据目录 |
 
-`/api/config` 只返回前端需要的视频参数，不包含 ComfyUI、LLM 或密钥信息。
+`/api/config` 只返回前端需要的视频参数与 `ffmpeg_enabled`，不包含 ComfyUI、LLM 或密钥信息。
 
 ## 内置工作流
 
@@ -209,6 +234,35 @@ $env:VIDEO_SERVICE_CONFIG = 'D:\config\minimax-h3-studio.yml'
 
 - `match`：匹配生成分辨率，默认且速度更快
 - `max`：最高身份保真，参考 token 参与每一步采样，耗时显著增加
+
+## 采样加速（Spectrum）
+
+两条工作流（FL2VA 与 Ref2VA）都内置了可选的采样加速节点 **Spectrum Apply MiniMax H3**（`SpectrumApplyMiniMaxH3`），接线方式为：模型加载器 → Spectrum 节点 → 调度器/引导器。
+
+| 配置 | 行为 |
+|---|---|
+| `comfyui.spectrum_apply.enabled: false`（默认） | 构建工作流时**移除**该节点，模型直接连回加载器；ComfyUI 无需安装任何额外依赖 |
+| `comfyui.spectrum_apply.enabled: true` | 工作流串联该节点；ComfyUI 必须安装 [ComfyUI-Spectrum-MiniMax-H3](https://github.com/xmarre/ComfyUI-Spectrum-MiniMax-H3)（节点位于 `sampling/spectrum`） |
+
+依赖安装（仅启用时需要）：
+
+```powershell
+cd ComfyUI/custom_nodes
+git clone https://github.com/xmarre/ComfyUI-Spectrum-MiniMax-H3.git
+# 重启 ComfyUI
+```
+
+Spectrum 通过对隐藏特征做 Chebyshev 岭回归预测来跳过部分 transformer 评估，从而加速采样，属于近似加速而非无损执行；`enabled` 关闭时原生逐帧采样。注意 README 顶部的示例 Gif 与安全建议：加速会改变去噪轨迹，质量敏感场景请同种子对比。
+
+## 视频转 GIF 下载
+
+配置 `ffmpeg.path`（ffmpeg.exe 绝对路径，或安装 `pip install imageio-ffmpeg` 后使用其自带静态二进制）后，前端详情页会对已完成视频显示「下载 GIF」按钮，服务端使用 palette 方式将视频转为 ≤480px 的循环 GIF 并缓存：
+
+```http
+GET /api/video/tasks/{task_id}/gif
+```
+
+`ffmpeg.path` 留空时该接口返回 404，前端也不显示 GIF 按钮。
 
 ## API 使用
 
@@ -295,7 +349,7 @@ curl -H "X-API-Key: dc_xxx" \
 
 - 输入、输出和下载全部通过已认证的 API 代理。
 - 客户端无法获得 ComfyUI 地址、prompt ID 或真实文件路径。
-- 历史接口只返回客户端显式持有的不可预测任务 ID。
+- 历史接口只返回客户端显式持有的不可预测任务 ID；管理员可查看全部任务历史。
 - API Key、调用统计和任务文件均维护在部署机器本地。
 - 默认保留终态任务 90 天，每周日 03:00 清理。
 - 每天 00:05 检查磁盘；占用达到 90% 时从最旧终态任务开始清理。

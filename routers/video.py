@@ -417,8 +417,11 @@ def parse_task_ids(raw: str) -> list[str]:
 async def get_video_tasks(
     task_ids: Annotated[str, Query(description="浏览器本地保存的任务 ID，使用英文逗号分隔")] = "",
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    access: dict = Depends(require_video_access),
 ):
-    """不返回全局任务。未提供 task_ids 时返回空列表，避免不同用户之间枚举历史。"""
+    """不返回全局任务；管理员（X-Admin-Key）可查看全部任务，其他身份必须显式提交任务 ID。"""
+    if access["role"] == "admin":
+        return {"tasks": video_service.list_tasks([], limit, include_all=True)}
     return {"tasks": video_service.list_tasks(parse_task_ids(task_ids), limit)}
 
 
@@ -481,8 +484,31 @@ async def delete_video_task(task_id: str):
 )
 async def get_video_queue(
     task_ids: Annotated[str, Query(description="浏览器本地保存的任务 ID，使用英文逗号分隔")] = "",
+    access: dict = Depends(require_video_access),
 ):
     try:
+        if access["role"] == "admin":
+            return await run_in_threadpool(video_service.sanitized_queue, [], True)
         return await run_in_threadpool(video_service.sanitized_queue, parse_task_ids(task_ids))
     except Exception:
         raise HTTPException(status_code=502, detail="暂时无法获取生成队列，请稍后重试")
+
+
+@router.get(
+    "/tasks/{task_id}/gif",
+    tags=[TAG_TASKS],
+    summary="将已完成视频转换为 GIF（需配置 ffmpeg）",
+)
+async def get_video_gif(task_id: str):
+    try:
+        path = await run_in_threadpool(video_service.ensure_video_gif, task_id)
+    except (ValueError, FileNotFoundError):
+        raise HTTPException(status_code=404, detail="视频资源不存在")
+    except RuntimeError as error:
+        raise HTTPException(status_code=502, detail=str(error)[:300])
+    return FileResponse(
+        path,
+        media_type="image/gif",
+        filename=path.name,
+        content_disposition_type="inline",
+    )

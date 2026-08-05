@@ -12,6 +12,7 @@ access_data/*
 .env
 .env.*
 config.local.yml
+.workbuddy/
 Thumbs.db
 .DS_Store
 AGENTS.md

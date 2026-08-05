@@ -9,6 +9,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from config import (
     DAILY_STORAGE_CHECK_HOUR,
     DAILY_STORAGE_CHECK_MINUTE,
+    FFMPEG_PATH,
     HISTORY_RETENTION_DAYS,
     PROJECT_ROOT,
     VIDEO_DEFAULT_DURATION,
@@ -148,7 +149,8 @@ async def frontend_config():
             "resolution_megapixels": VIDEO_DEFAULT_MEGAPIXELS,
             "resolution_megapixels_min": VIDEO_MIN_MEGAPIXELS,
             "resolution_megapixels_max": VIDEO_MAX_MEGAPIXELS,
-        }
+        },
+        "ffmpeg_enabled": bool(FFMPEG_PATH),
     }
 
 

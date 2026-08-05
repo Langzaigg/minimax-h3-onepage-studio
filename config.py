@@ -9,6 +9,17 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = Path(os.getenv("VIDEO_SERVICE_CONFIG", PROJECT_ROOT / "config.yml")).resolve()
 
 
+def _deep_merge(base: dict, override: dict) -> dict:
+    """递归合并：override 中的 dict 与 base 同名键逐层合并，其余覆盖。"""
+    result = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
 def _load_config() -> dict[str, Any]:
     try:
         data = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
@@ -16,6 +27,14 @@ def _load_config() -> dict[str, Any]:
         raise RuntimeError(f"配置文件不存在：{CONFIG_PATH}") from error
     if not isinstance(data, dict):
         raise RuntimeError("config.yml 顶层必须是对象")
+    # config.local.yml 与本机私密覆盖项（已被 .gitignore 忽略），
+    # 逐层合并到 config.yml 之上，用于存放 API Key、本机路径等不提交的配置。
+    local_path = CONFIG_PATH.with_name("config.local.yml")
+    if local_path.is_file():
+        local_data = yaml.safe_load(local_path.read_text(encoding="utf-8")) or {}
+        if not isinstance(local_data, dict):
+            raise RuntimeError("config.local.yml 顶层必须是对象")
+        data = _deep_merge(data, local_data)
     return data
 
 
@@ -74,8 +93,15 @@ COMFYUI_REF2VA_MODEL = _setting(
 COMFYUI_TEXT_ENCODER = _setting(
     "comfyui.models.text_encoder",
     "COMFYUI_TEXT_ENCODER",
-    "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+    "qwen3vl_32b_minimax_h3_int8_convrot.safetensors",
 )
+# 采样加速（Spectrum Apply MiniMax H3）默认不启用；仅在 comfyui.spectrum_apply.enabled=true
+# 时工作流才引用该节点，关闭时工作流完全移除节点，ComfyUI 侧无需安装对应依赖。
+COMFYUI_SPECTRUM_ENABLED = _setting(
+    "comfyui.spectrum_apply.enabled", "COMFYUI_SPECTRUM_ENABLED", False, bool
+)
+# ffmpeg 可执行文件路径；留空时前端不提供视频转 GIF 下载。
+FFMPEG_PATH = _setting("ffmpeg.path", "FFMPEG_PATH", "")
 COMFYUI_VIDEO_VAE = _setting(
     "comfyui.models.video_vae",
     "COMFYUI_VIDEO_VAE",

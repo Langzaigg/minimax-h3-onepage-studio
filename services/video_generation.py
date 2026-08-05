@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import threading
 import tempfile
+import time
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -23,9 +24,11 @@ from config import (
     COMFYUI_BASE_URL,
     COMFYUI_FL2VA_MODEL,
     COMFYUI_REF2VA_MODEL,
+    COMFYUI_SPECTRUM_ENABLED,
     COMFYUI_TEXT_ENCODER,
     COMFYUI_TIMEOUT,
     COMFYUI_VIDEO_VAE,
+    FFMPEG_PATH,
     VIDEO_DATA_FOLDER,
     VIDEO_MODEL,
     VIDEO_WORKFLOW_FOLDER,
@@ -39,6 +42,7 @@ REFERENCE_ASSET_RE = re.compile(r"^reference_(image|video|audio)_([1-9]\d*)$")
 NODE_STAGES = {
     "104": "正在解析提示词与参考帧",
     "136": "正在解析多模态参考素材",
+    "150": "正在应用采样加速",
     "14": "正在采样生成",
     "10": "正在解码视频",
     "23": "正在解码音频",
@@ -68,9 +72,19 @@ def _save_metadata(data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     data["updated_at"] = now_iso()
     temp = path.with_suffix(".tmp")
+    payload = json.dumps(data, ensure_ascii=False, indent=2)
     with _write_lock:
-        temp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(temp, path)
+        # Windows 杀软可能瞬时锁定新写入的 .tmp 文件，导致 os.replace 抛 WinError 5，
+        # 短退避重试可避免偶发写入失败。
+        for attempt in range(5):
+            try:
+                temp.write_text(payload, encoding="utf-8")
+                os.replace(temp, path)
+                return
+            except OSError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
 
 
 def load_metadata(task_id: str) -> dict[str, Any]:
@@ -145,7 +159,10 @@ def iter_task_records() -> list[dict[str, Any]]:
     return rows
 
 
-def list_tasks(task_ids: list[str], limit: int = 100) -> list[dict[str, Any]]:
+def list_tasks(task_ids: list[str], limit: int = 100, include_all: bool = False) -> list[dict[str, Any]]:
+    if include_all:
+        rows = iter_task_records()[:limit]
+        return [public_task(item) for item in rows]
     allowed = {task_id for task_id in task_ids if TASK_ID_RE.fullmatch(task_id)}
     rows = [item for item in iter_task_records() if item.get("id") in allowed]
     return [public_task(item) for item in rows[:limit]]
@@ -248,6 +265,13 @@ def _data_url(path: Path) -> str:
     return f"data:{mime};base64,{base64.b64encode(path.read_bytes()).decode('ascii')}"
 
 
+def _clean_polished_output(raw: str) -> str:
+    """Remove model-internal reasoning blocks and code fences from polished prompts."""
+    cleaned = re.sub(r"<think>.*?</think>", "", raw, flags=re.IGNORECASE | re.DOTALL)
+    cleaned = re.sub(r"^```(?:text)?\s*|\s*```$", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
+    return cleaned.strip()
+
+
 def polish_prompt(prompt: str, mode: str, duration: float, images: list[Path]) -> str:
     guide_path = Path(VIDEO_WORKFLOW_FOLDER) / "VIDEO_PROMPT_WRITING_GUIDE_base_en.md"
     guide = guide_path.read_text(encoding="utf-8")
@@ -280,8 +304,7 @@ def polish_prompt(prompt: str, mode: str, duration: float, images: list[Path]) -
         {"role": "user", "content": content},
     ]
     options = CompletionOptions(model=VIDEO_MODEL, temperature=0.2, max_tokens=5000)
-    result = LLMClient().complete_text(messages, options).strip()
-    result = re.sub(r"^```(?:text)?\s*|\s*```$", "", result, flags=re.IGNORECASE | re.DOTALL).strip()
+    result = _clean_polished_output(LLMClient().complete_text(messages, options))
     if not result:
         raise RuntimeError("模型未返回润色后的提示词")
     return result
@@ -457,13 +480,29 @@ def polish_reference_prompt(
             {"role": "system", "content": system},
             {"role": "user", "content": content},
         ]
-        result = LLMClient().complete_text(
-            messages, CompletionOptions(model=VIDEO_MODEL, temperature=0.2, max_tokens=9000)
-        ).strip()
-    result = re.sub(r"^```(?:text)?\s*|\s*```$", "", result, flags=re.IGNORECASE | re.DOTALL).strip()
+        result = _clean_polished_output(
+            LLMClient().complete_text(
+                messages, CompletionOptions(model=VIDEO_MODEL, temperature=0.2, max_tokens=9000)
+            )
+        )
     if not result:
         raise RuntimeError("模型未返回润色后的全参考提示词")
     return result
+
+
+def _apply_spectrum(workflow: dict, loader_id: str, consumer_ids: list[str], enabled: bool) -> None:
+    """采样加速（Spectrum Apply MiniMax H3）开关。
+
+    启用时保持节点 150 串联在模型加载器与调度器/引导器之间；
+    关闭时直接把消费者模型输入回连到加载器，并移除节点，
+    使工作流完全不引用 Spectrum 节点，ComfyUI 侧无需安装该依赖。
+    """
+    if enabled:
+        workflow["150"]["inputs"]["enabled"] = True
+        return
+    workflow.pop("150", None)
+    for node_id in consumer_ids:
+        workflow[node_id]["inputs"]["model"] = [loader_id, 0]
 
 
 def _workflow(mode: str, prompt: str, width: int, height: int, duration: float, seed: int) -> dict:
@@ -480,10 +519,12 @@ def _workflow(mode: str, prompt: str, width: int, height: int, duration: float, 
         )
         workflow["129"]["inputs"]["noise_seed"] = seed
         workflow["92"]["inputs"]["filename_prefix"] = f"video/minimax_h3_studio_ref_{uuid.uuid4().hex}"
+        _apply_spectrum(workflow, "127", ["124", "126"], COMFYUI_SPECTRUM_ENABLED)
         return workflow
     # All modes share the same graph; unused optional image branches are removed.
     workflow = json.loads((Path(VIDEO_WORKFLOW_FOLDER) / "video_api.json").read_text(encoding="utf-8"))
     workflow["6"]["inputs"]["unet_name"] = COMFYUI_FL2VA_MODEL
+    _apply_spectrum(workflow, "6", ["9", "16"], COMFYUI_SPECTRUM_ENABLED)
     workflow["11"]["inputs"]["vae_name"] = COMFYUI_VIDEO_VAE
     workflow["13"]["inputs"]["clip_name"] = COMFYUI_TEXT_ENCODER
     workflow["24"]["inputs"]["vae_name"] = COMFYUI_AUDIO_VAE
@@ -745,6 +786,40 @@ def _find_video_descriptor(history_item: dict) -> dict | None:
     return None
 
 
+def ensure_video_gif(task_id: str) -> Path:
+    """把已完成任务的视频转成 GIF（palette 方式，输出缓存在任务 outputs 目录）。"""
+    if not FFMPEG_PATH:
+        raise RuntimeError("服务端未配置 ffmpeg，无法转换 GIF")
+    data = load_metadata(task_id)
+    video = data.get("_assets", {}).get("video")
+    if not video or not Path(video).is_file():
+        raise FileNotFoundError("video")
+    source = Path(video)
+    target = source.with_suffix(".gif")
+    if target.is_file() and target.stat().st_mtime >= source.stat().st_mtime:
+        return target
+    completed = subprocess.run(
+        [
+            FFMPEG_PATH, "-y", "-i", str(source),
+            "-vf",
+            "fps=12,scale='min(480,iw)':-2:flags=lanczos,split[s0][s1];"
+            "[s0]palettegen=stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=5",
+            "-loop", "0",
+            str(target),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=300,
+        check=False,
+    )
+    if completed.returncode != 0 or not target.is_file():
+        detail = (completed.stderr or completed.stdout or "").strip()[-400:]
+        raise RuntimeError(f"GIF 转换失败：{detail}")
+    return target
+
+
 def video_output_filename(task_id: str, data: dict[str, Any], suffix: str = ".mp4") -> str:
     """Return a stable, filesystem-safe download name for a generated video."""
     created_at = str(data.get("created_at", ""))
@@ -829,15 +904,20 @@ async def shutdown_background_tasks() -> None:
         await asyncio.gather(*tuple(_background_tasks), return_exceptions=True)
 
 
-def sanitized_queue(task_ids: list[str]) -> dict[str, Any]:
+def sanitized_queue(task_ids: list[str], include_all: bool = False) -> dict[str, Any]:
     queue = ComfyClient().queue()
     task_lookup = {}
-    allowed = {task_id for task_id in task_ids if TASK_ID_RE.fullmatch(task_id)}
-    for data in iter_task_records():
-        if data.get("id") not in allowed:
-            continue
-        if data.get("_comfy_prompt_id"):
-            task_lookup[data["_comfy_prompt_id"]] = data["id"]
+    if include_all:
+        for data in iter_task_records():
+            if data.get("_comfy_prompt_id"):
+                task_lookup[data["_comfy_prompt_id"]] = data["id"]
+    else:
+        allowed = {task_id for task_id in task_ids if TASK_ID_RE.fullmatch(task_id)}
+        for data in iter_task_records():
+            if data.get("id") not in allowed:
+                continue
+            if data.get("_comfy_prompt_id"):
+                task_lookup[data["_comfy_prompt_id"]] = data["id"]
     rows = []
     for state, key in (("running", "queue_running"), ("pending", "queue_pending")):
         for index, item in enumerate(queue.get(key, []), start=1):
