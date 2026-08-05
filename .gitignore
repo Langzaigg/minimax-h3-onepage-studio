@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+video_data/*
+access_data/*
+!video_data/.gitkeep
+!access_data/.gitkeep
+
+.env
+.env.*
+config.local.yml
+Thumbs.db
+.DS_Store
+AGENTS.md

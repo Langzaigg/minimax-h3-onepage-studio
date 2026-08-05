@@ -1,0 +1,42 @@
+{
+  "endpoint": "POST /api/video/reference-tasks",
+  "prompt_file": "prompt.txt",
+  "duration": 15.0,
+  "resolution_megapixels": 0.9,
+  "aspect_ratio": "16:9",
+  "seed": 4741812217841896981,
+  "polish_prompt_first": false,
+  "source_prompt_was_polished": true,
+  "ref_image_size": "max",
+  "use_video_audio": true,
+  "references": [
+    {
+      "kind": "image",
+      "index": 1,
+      "label": "<Picture 1>",
+      "original_filename": "CHR_真紅_喜_白衣制服.png",
+      "file": "references/reference_image_1.png"
+    },
+    {
+      "kind": "image",
+      "index": 2,
+      "label": "<Picture 2>",
+      "original_filename": "屏幕截图 2026-08-04 210044.png",
+      "file": "references/reference_image_2.png"
+    },
+    {
+      "kind": "image",
+      "index": 3,
+      "label": "<Picture 3>",
+      "original_filename": "BG064_051.png",
+      "file": "references/reference_image_3.png"
+    },
+    {
+      "kind": "image",
+      "index": 4,
+      "label": "<Picture 4>",
+      "original_filename": "SHINKU_FD_e20a2.png",
+      "file": "references/reference_image_4.png"
+    }
+  ]
+}

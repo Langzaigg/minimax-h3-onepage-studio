@@ -1,0 +1,8 @@
+fastapi>=0.133,<1
+pydantic>=2.13,<3
+uvicorn[standard]>=0.41,<1
+python-multipart>=0.0.22,<1
+Pillow>=12.3,<13
+PyYAML>=6.0,<7
+requests>=2.33,<3
+websockets>=15,<16

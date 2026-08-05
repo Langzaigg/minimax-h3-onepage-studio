@@ -1,0 +1,50 @@
+server:
+  host: 0.0.0.0
+  port: 7788
+  admin_key: "admin"
+  session_max_age_seconds: 31536000
+  restart_delay_seconds: 1.5
+  git_pull_timeout_seconds: 120
+
+comfyui:
+  base_url: "http://127.0.0.1:8188"
+  timeout_seconds: 60
+  models:
+    # Official ComfyUI MiniMax H3 workflow defaults.
+    fl2va_diffusion: "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
+    ref2va_diffusion: "minimax_h3_ref2va_pruned_int8_convrot.safetensors"
+    text_encoder: "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
+    video_vae: "minimax_h3_video_vae_fp16.safetensors"
+    audio_vae: "minimax_h3_audio_vae_fp32.safetensors"
+
+llm:
+  base_url: "http://127.0.0.1:8000/v1"
+  api_key: ""
+  model: "vision-model"
+  timeout_seconds: 180
+  context_window: 131000
+  context_margin_tokens: 512
+  min_completion_tokens: 512
+
+video:
+  duration:
+    default: 5
+    min: 5
+    max: 15
+  resolution_megapixels:
+    default: 0.4
+    min: 0.2
+    max: 1.0
+
+storage:
+  task_data_dir: "video_data"
+  workflow_dir: "video_workflows"
+  access_data_dir: "access_data"
+  retention_days: 90
+  weekly_cleanup:
+    weekday: 6
+    hour: 3
+  daily_disk_check:
+    hour: 0
+    minute: 5
+  usage_threshold_percent: 90

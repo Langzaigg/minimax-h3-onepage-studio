@@ -1,0 +1,69 @@
+subject_definitions:
+<Subject 1> is the blonde young woman whose appearance and clothing come from <Picture 1>. She has very long blonde twin-tails tied with dark-red ribbons, red eyes, a white open coat with long flowing tails, a purple-and-blue sailor-style uniform top, a large red chest bow, a short red pleated skirt, black thigh-high stockings, and white ankle boots. During her fall, her body orientation and airborne pose follow <Picture 4>: her body turns nearly horizontal and sideways, her head and shoulders tilt downward, and her long hair and coat spread dramatically around her.
+
+<Subject 2> is the flying pink-haired young woman in <Picture 2>. She has long rose-pink hair, blue eyes, and a streamlined futuristic flight suit in pale blue, white, pink, and dark red. Large blade-shaped aerodynamic units extend from her forearms, and her long armored boots contain pointed propulsion units that leave narrow red-white energy trails.
+
+<Subject 3> is the stormy coastal lighthouse environment in <Picture 3>, featuring a tall white lighthouse on a rocky, grass-covered headland beside a dark blue-grey sea, under heavy grey clouds, slanting rain, strong coastal wind, wet vegetation, mist, and subdued cold daylight.
+
+summary:
+[reference generation] The target video is a short anime-style action-comedy sequence set in <Subject 3>. <Subject 1> stands on the upper gallery of the lighthouse until a powerful sea-wind gust blows her over the edge. She falls in the sideways airborne pose referenced for <Subject 1> while <Subject 2> flies past the lighthouse below. <Subject 1> accidentally crashes down onto <Subject 2>, disrupting her flight, and both characters tumble together into the sea.
+
+retention_analysis:
+<Subject 1> (appears in [Shot 1], [Shot 2], [Shot 3], [Shot 4], [Shot 5]): fully_preserved - her blonde twin-tails, red eyes, ribbon accessories, white flowing coat, colorful sailor-style uniform, red skirt, black stockings, and white boots remain consistent, while her falling orientation follows the sideways pose supplied by <Picture 4>.
+
+<Subject 2> (appears in [Shot 3], [Shot 4], [Shot 5]): fully_preserved - her long pink hair, blue eyes, pale futuristic flight suit, forearm-mounted blade units, pointed propulsion boots, and red-white energy trails remain visually recognizable throughout the flight and collision.
+
+<Subject 3> (appears in [Shot 1], [Shot 2], [Shot 3], [Shot 4], [Shot 5]): fully_preserved - the white lighthouse, rocky green headland, dark sea, rain, mist, heavy clouds, wet vegetation, and strong coastal wind define the entire setting.
+
+detailed_description:
+The target video uses polished 2D Japanese anime animation with clean character linework, expressive motion, cool stormy colors, cinematic compositing, and exaggerated but physically readable action. The two characters must remain visually distinct and retain their referenced faces, hairstyles, clothing, and color schemes in every shot.
+
+[Shot 1] A wide establishing shot presents <Subject 3>, the tall white lighthouse rising above a rain-soaked coastal headland and a restless blue-grey sea. Rain crosses the frame diagonally while tall grass bends under the wind. The camera slowly cranes upward along the lighthouse and reveals <Subject 1> standing on the narrow upper gallery outside the lantern room. Her extremely long blonde twin-tails and the tails of her white coat stream violently toward the left. She steadies herself against the railing and looks out over the sea.
+
+[Shot 2] At 00:02.500, the shot cuts to a medium close-up from the seaward side of the gallery. A sudden, much stronger gust strikes <Subject 1> from behind. Her coat billows open like a sail, her eyes widen, and both feet lift from the wet platform. She reaches toward the railing but misses it by a few centimeters. The camera snaps backward as the wind carries her completely over the edge.
+
+[Shot 3] At 00:04.500, a steep downward tracking shot follows <Subject 1> falling beside the lighthouse. Her body rotates into the pose referenced from <Picture 4>: nearly horizontal and sideways, with her head and shoulders angled downward, one arm reaching helplessly through the air, and her legs trailing behind. Her blonde twin-tails, ribbons, skirt, and long white coat spread around her in the rushing wind. Farther below, <Subject 2> enters from the left, flying smoothly past the lighthouse in a horizontal path. Red-white propulsion trails extend behind her pointed boots.
+
+[Shot 4] At 00:06.800, the camera cuts to a wide side view that clearly shows both trajectories converging. <Subject 2> looks upward only an instant before <Subject 1> drops directly onto her upper back and shoulders. The collision produces a brief squash-and-rebound motion without visible injury. <Subject 2>'s eyes open in alarm, her forearm blades swing outward, and her propulsion trails bend sharply and flicker. Unable to stabilize, the two characters become entangled and begin spinning downward together.
+
+[Shot 5] At 00:09.000, the camera tilts rapidly toward the sea while following their tumbling descent. <Subject 1>'s white coat and blonde hair spiral around both figures as <Subject 2>'s weakened propulsion units sputter in short bursts. They strike the ocean together at 00:11.000, creating one large splash and a circular burst of white foam. The final high-angle frame holds on expanding ripples beneath the lighthouse as a few bubbles rise to the surface.
+
+overall_soundscape:
+Continuous coastal rain, turbulent surf, distant thunder, and strong wind surround the lighthouse. The wind rises into a sharp gust when <Subject 1> is blown away, followed by rushing air during the fall, a soft comedic impact thump when the characters collide, unstable propulsion sputters, and a large final water splash. No dialogue is heard.
+
+non_diegetic_music:
+A light, fast-paced orchestral comedy cue begins quietly over the establishing shot, accelerates during the fall, punctuates the midair collision with a brief startled accent, and ends abruptly on the ocean splash.subject_definitions:
+<Subject 1> is the blonde young woman whose appearance and clothing come from <Picture 1>. She has very long blonde twin-tails tied with dark-red ribbons, red eyes, a white open coat with long flowing tails, a purple-and-blue sailor-style uniform top, a large red chest bow, a short red pleated skirt, black thigh-high stockings, and white ankle boots. During her fall, her body orientation and airborne pose follow <Picture 4> (SHINKU_FD_e20a2.png): her body turns nearly horizontal and sideways, her head and shoulders tilt downward, and her long hair and coat spread dramatically around her.
+
+<Subject 2> is the flying pink-haired young woman in <Picture 2>. She has long rose-pink hair, blue eyes, and a streamlined futuristic flight suit in pale blue, white, pink, and dark red. Large blade-shaped aerodynamic units extend from her forearms, and her long armored boots contain pointed propulsion units that leave narrow red-white energy trails.
+
+<Subject 3> is the stormy coastal lighthouse environment in <Picture 3> (BG064_051.png), featuring a tall white lighthouse on a rocky, grass-covered headland beside a dark blue-grey sea, under heavy grey clouds, slanting rain, strong coastal wind, wet vegetation, mist, and subdued cold daylight.
+
+summary:
+[reference generation] The target video is a short anime-style action-comedy sequence set in <Subject 3>. <Subject 1> stands on the upper gallery of the lighthouse until a powerful sea-wind gust blows her over the edge. She falls in the sideways airborne pose referenced for <Subject 1> while <Subject 2> flies past the lighthouse below. <Subject 1> accidentally crashes down onto <Subject 2>, disrupting her flight, and both characters tumble together into the sea.
+
+retention_analysis:
+<Subject 1> (appears in [Shot 1], [Shot 2], [Shot 3], [Shot 4], [Shot 5]): fully_preserved - her blonde twin-tails, red eyes, ribbon accessories, white flowing coat, colorful sailor-style uniform, red skirt, black stockings, and white boots remain consistent, while her falling orientation follows the sideways pose supplied by <Picture 4>.
+
+<Subject 2> (appears in [Shot 3], [Shot 4], [Shot 5]): fully_preserved - her long pink hair, blue eyes, pale futuristic flight suit, forearm-mounted blade units, pointed propulsion boots, and red-white energy trails remain visually recognizable throughout the flight and collision.
+
+<Subject 3> (appears in [Shot 1], [Shot 2], [Shot 3], [Shot 4], [Shot 5]): fully_preserved - the white lighthouse, rocky green headland, dark sea, rain, mist, heavy clouds, wet vegetation, and strong coastal wind define the entire setting.
+
+detailed_description:
+The target video uses polished 2D Japanese anime animation with clean character linework, expressive motion, cool stormy colors, cinematic compositing, and exaggerated but physically readable action. The two characters must remain visually distinct and retain their referenced faces, hairstyles, clothing, and color schemes in every shot.
+
+[Shot 1] A wide establishing shot presents <Subject 3>, the tall white lighthouse rising above a rain-soaked coastal headland and a restless blue-grey sea. Rain crosses the frame diagonally while tall grass bends under the wind. The camera slowly cranes upward along the lighthouse and reveals <Subject 1> standing on the narrow upper gallery outside the lantern room. Her extremely long blonde twin-tails and the tails of her white coat stream violently toward the left. She steadies herself against the railing and looks out over the sea.
+
+[Shot 2] At 00:02.500, the shot cuts to a medium close-up from the seaward side of the gallery. A sudden, much stronger gust strikes <Subject 1> from behind. Her coat billows open like a sail, her eyes widen, and both feet lift from the wet platform. She reaches toward the railing but misses it by a few centimeters. The camera snaps backward as the wind carries her completely over the edge.
+
+[Shot 3] At 00:04.500, a steep downward tracking shot follows <Subject 1> falling beside the lighthouse. Her body rotates into the pose referenced from <Picture 4>: nearly horizontal and sideways, with her head and shoulders angled downward, one arm reaching helplessly through the air, and her legs trailing behind. Her blonde twin-tails, ribbons, skirt, and long white coat spread around her in the rushing wind. Farther below, <Subject 2> enters from the left, flying smoothly past the lighthouse in a horizontal path. Red-white propulsion trails extend behind her pointed boots.
+
+[Shot 4] At 00:06.800, the camera cuts to a wide side view that clearly shows both trajectories converging. <Subject 2> looks upward only an instant before <Subject 1> drops directly onto her upper back and shoulders. The collision produces a brief squash-and-rebound motion without visible injury. <Subject 2>'s eyes open in alarm, her forearm blades swing outward, and her propulsion trails bend sharply and flicker. Unable to stabilize, the two characters become entangled and begin spinning downward together.
+
+[Shot 5] At 00:09.000, the camera tilts rapidly toward the sea while following their tumbling descent. <Subject 1>'s white coat and blonde hair spiral around both figures as <Subject 2>'s weakened propulsion units sputter in short bursts. They strike the ocean together at 00:11.000, creating one large splash and a circular burst of white foam. The final high-angle frame holds on expanding ripples beneath the lighthouse as a few bubbles rise to the surface.
+
+overall_soundscape:
+Continuous coastal rain, turbulent surf, distant thunder, and strong wind surround the lighthouse. The wind rises into a sharp gust when <Subject 1> is blown away, followed by rushing air during the fall, a soft comedic impact thump when the characters collide, unstable propulsion sputters, and a large final water splash. No dialogue is heard.
+
+non_diegetic_music:
+A light, fast-paced orchestral comedy cue begins quietly over the establishing shot, accelerates during the fall, punctuates the midair collision with a brief startled accent, and ends abruptly on the ocean splash.
