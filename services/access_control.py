@@ -5,6 +5,7 @@ import json
 import os
 import secrets
 import threading
+import time
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -17,6 +18,7 @@ COOKIE_NAME = "minimax_h3_studio_access_session"
 ANONYMOUS_KEY_ID = "anonymous"
 ADMIN_KEY_ID = "admin"
 KEYS_PATH = Path(ACCESS_DATA_FOLDER) / "api_keys.json"
+USERS_PATH = Path(ACCESS_DATA_FOLDER) / "users.json"
 STATS_PATH = Path(ACCESS_DATA_FOLDER) / "usage_stats.json"
 _lock = threading.RLock()
 
@@ -40,8 +42,17 @@ def _read_json(path: Path, default: dict) -> dict:
 def _write_json(path: Path, value: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix(path.suffix + ".tmp")
-    temp.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(temp, path)
+    payload = json.dumps(value, ensure_ascii=False, indent=2)
+    # Windows 杀软可能瞬时锁定新写入的 .tmp 文件，短退避重试避免偶发 WinError 5。
+    for attempt in range(5):
+        try:
+            temp.write_text(payload, encoding="utf-8")
+            os.replace(temp, path)
+            return
+        except OSError:
+            if attempt == 4:
+                raise
+            time.sleep(0.05 * (attempt + 1))
 
 
 def _key_store() -> dict:
@@ -123,6 +134,46 @@ def is_admin_secret(secret: str | None) -> bool:
     return hmac.compare_digest(secret or "", SERVICE_ADMIN_KEY)
 
 
+def _users_store() -> dict:
+    return _read_json(USERS_PATH, {"version": 1, "users": []})
+
+
+def register_user(name: str) -> dict[str, Any]:
+    """注册模式：用用户名注册/登录（无密码）。同名用户直接复用。"""
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("用户名不能为空")
+    if len(name) > 32:
+        raise ValueError("用户名最长 32 个字符")
+    if any(ord(ch) < 32 for ch in name):
+        raise ValueError("用户名包含非法字符")
+    with _lock:
+        store = _users_store()
+        users = store.setdefault("users", [])
+        for row in users:
+            if str(row.get("name", "")).casefold() == name.casefold():
+                row["last_used_at"] = _iso(_now())
+                _write_json(USERS_PATH, store)
+                return dict(row)
+        row = {
+            "id": uuid.uuid4().hex,
+            "name": name,
+            "created_at": _iso(_now()),
+            "last_used_at": _iso(_now()),
+        }
+        users.append(row)
+        _write_json(USERS_PATH, store)
+        return dict(row)
+
+
+def find_user(user_id: str) -> dict[str, Any] | None:
+    with _lock:
+        for row in _users_store().get("users", []):
+            if row.get("id") == user_id:
+                return dict(row)
+    return None
+
+
 def _b64encode(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
 
@@ -154,6 +205,10 @@ def verify_session(token: str | None) -> dict[str, Any] | None:
         return None
     if claims.get("role") == "admin":
         return {"role": "admin", "key_id": ADMIN_KEY_ID, "name": "管理员"}
+    if claims.get("role") == "user":
+        user = find_user(str(claims.get("key_id") or ""))
+        if user:
+            return {"role": "user", "key_id": user["id"], "name": user["name"]}
     if claims.get("role") == "api_key":
         with _lock:
             for row in _key_store().get("keys", []):
@@ -198,6 +253,9 @@ def usage_stats(start_date: date, end_date: date, key_id: str | None = None) -> 
         key_rows = _key_store().get("keys", [])
     labels = {ANONYMOUS_KEY_ID: "未认证", ADMIN_KEY_ID: "管理员"}
     labels.update({row["id"]: row["name"] for row in key_rows})
+    with _lock:
+        for row in _users_store().get("users", []):
+            labels.setdefault(row["id"], row["name"])
     totals: dict[tuple[str, str, str], int] = {}
     weeks: set[str] = set()
     endpoints: set[str] = set()

@@ -1,0 +1,53 @@
+# MiniMax H3 视频服务配置模板
+# 用法：复制本文件为 config.yml 后按需修改（config.yml 已被 .gitignore 忽略，不会提交）。
+# 私密项（API Key、管理员密钥、本机 ffmpeg 路径、本机开关等）建议写在 config.local.yml，
+# 该文件同样被 .gitignore 忽略；config.local.yml 会逐层覆盖 config.yml 的同名配置。
+
+server:
+  host: 0.0.0.0
+  port: 7788
+  admin_key: "change-me"  # 生产环境务必修改，或通过 SERVICE_ADMIN_KEY 环境变量覆盖
+  session_max_age_seconds: 31536000
+  restart_delay_seconds: 1.5
+  git_pull_timeout_seconds: 120
+
+access:
+  # key = 密钥模式（默认）：管理员/API Key 访问
+  # register = 注册模式：任意用户名即可注册使用（无密码），各自历史隔离；输入管理员密钥自动以管理员身份登录
+  mode: "key"
+
+comfyui:
+  base_url: "http://127.0.0.1:8188"
+  timeout_seconds: 60
+  models:
+    fl2va_diffusion: "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
+    ref2va_diffusion: "minimax_h3_ref2va_pruned_int8_convrot.safetensors"
+    text_encoder: "qwen3vl_32b_minimax_h3_int8_convrot.safetensors"
+    video_vae: "minimax_h3_video_vae_fp16.safetensors"
+    audio_vae: "minimax_h3_audio_vae_fp32.safetensors"
+  # 采样加速（Spectrum Apply MiniMax H3），默认不启用；启用需在 ComfyUI 安装对应自定义节点
+  spectrum_apply:
+    enabled: false
+
+llm:
+  base_url: "http://127.0.0.1:8000/v1"
+  api_key: ""
+  model: "vision-model"
+  timeout_seconds: 180
+  context_window: 131000
+  context_margin_tokens: 512
+  min_completion_tokens: 512
+
+ffmpeg:
+  # 视频转 GIF 下载所需；留空则前端不显示 GIF 下载按钮
+  path: ""
+
+video:
+  duration: {default: 5, min: 5, max: 15}
+  resolution_megapixels: {default: 0.4, min: 0.2, max: 1.0}
+
+storage:
+  history_retention_days: 90
+  weekly_cleanup: {weekday: 0, hour: 3, minute: 0}
+  daily_storage_check: {hour: 0, minute: 5}
+  disk_usage_limit_percent: 90

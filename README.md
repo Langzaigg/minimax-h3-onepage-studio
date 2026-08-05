@@ -51,6 +51,11 @@ flowchart LR
 
 浏览器只保存自己创建的不可预测任务 ID。任务列表接口必须显式提交这些 ID，不会枚举服务端全局历史；唯一例外是管理员（`X-Admin-Key`）可以查看全部任务历史。
 
+访问模式由 `access.mode` 控制：
+
+- `key`（默认）：使用管理员密钥或 API Key 验证。
+- `register`：任意用户名即可注册使用（无密码），会话保存在浏览器；输入管理员密钥则自动以管理员身份登录。每个用户/密钥只能看到自己创建的任务历史，管理员仍可查看全部。
+
 ## 快速开始
 
 ### 环境要求
@@ -79,6 +84,8 @@ python -m pip install -r requirements.txt
 python -B scripts\check_comfyui.py
 python -B run.py
 ```
+
+本机持续运行（自动检测代码/配置更新并重启，不执行任何 git 操作）可直接双击仓库根目录的 [`start_service.bat`](start_service.bat)；关闭该窗口即停止服务。
 
 默认入口：
 
@@ -152,6 +159,10 @@ server:
   host: 0.0.0.0
   port: 7788
   admin_key: "admin"
+
+access:
+  # key = 密钥模式（默认，管理员/API Key）；register = 注册模式（用户名即注册，无密码）
+  mode: "key"
 
 comfyui:
   base_url: "http://127.0.0.1:8188"
@@ -349,7 +360,7 @@ curl -H "X-API-Key: dc_xxx" \
 
 - 输入、输出和下载全部通过已认证的 API 代理。
 - 客户端无法获得 ComfyUI 地址、prompt ID 或真实文件路径。
-- 历史接口只返回客户端显式持有的不可预测任务 ID；管理员可查看全部任务历史。
+- 历史接口按身份隔离：每个 API Key/注册用户只能看到自己创建的任务，管理员可查看全部。
 - API Key、调用统计和任务文件均维护在部署机器本地。
 - 默认保留终态任务 90 天，每周日 03:00 清理。
 - 每天 00:05 检查磁盘；占用达到 90% 时从最旧终态任务开始清理。

@@ -7,6 +7,10 @@ class AccessVerifyRequest(BaseModel):
     secret: str = Field(min_length=1, max_length=512)
 
 
+class RegisterRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=32)
+
+
 class ApiKeyCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     valid_for_hours: int = Field(ge=1, le=87600, description="生效时长，单位小时，最大十年")

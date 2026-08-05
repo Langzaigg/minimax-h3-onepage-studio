@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from config import (
+    ACCESS_MODE,
     DAILY_STORAGE_CHECK_HOUR,
     DAILY_STORAGE_CHECK_MINUTE,
     FFMPEG_PATH,
@@ -151,6 +152,7 @@ async def frontend_config():
             "resolution_megapixels_max": VIDEO_MAX_MEGAPIXELS,
         },
         "ffmpeg_enabled": bool(FFMPEG_PATH),
+        "access_mode": ACCESS_MODE,
     }
 
 

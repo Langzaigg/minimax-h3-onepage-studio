@@ -78,6 +78,9 @@ SERVICE_GIT_PULL_TIMEOUT = _setting(
     "server.git_pull_timeout_seconds", "SERVICE_GIT_PULL_TIMEOUT", 120, int
 )
 
+# 访问模式：key = 密钥模式（默认，管理员/API Key）；register = 注册模式（用户名即注册，无密码）。
+ACCESS_MODE = _setting("access.mode", "ACCESS_MODE", "key")
+
 COMFYUI_BASE_URL = _setting("comfyui.base_url", "COMFYUI_BASE_URL", "http://127.0.0.1:8188")
 COMFYUI_TIMEOUT = _setting("comfyui.timeout_seconds", "COMFYUI_TIMEOUT", 60, int)
 COMFYUI_FL2VA_MODEL = _setting(
@@ -124,6 +127,9 @@ LLM_CONTEXT_MARGIN_TOKENS = _setting(
 LLM_MIN_COMPLETION_TOKENS = _setting(
     "llm.min_completion_tokens", "LLM_MIN_COMPLETION_TOKENS", 512, int
 )
+# NSFW 破甲提示词：开启后润色系统提示词追加成人向放行指令（默认关闭，
+# 仅影响润色阶段，不体现在网页上）。
+LLM_NSFW_ARMOR = _setting("llm.nsfw_armor", "LLM_NSFW_ARMOR", False, bool)
 
 VIDEO_DEFAULT_DURATION = _setting("video.duration.default", "VIDEO_DEFAULT_DURATION", 5, float)
 VIDEO_MIN_DURATION = _setting("video.duration.min", "VIDEO_MIN_DURATION", 5, float)

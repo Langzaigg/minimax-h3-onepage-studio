@@ -21,6 +21,20 @@ class CompletionOptions:
     max_tokens: int = 5000
 
 
+def _estimate_text_tokens(messages: list[dict[str, Any]]) -> int:
+    """按文本内容估算提示词 token 数（图片 data URL 由模型服务端自行处理，不占本估算）。"""
+    total = 0
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, str):
+            total += len(content)
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    total += len(str(part.get("text", "")))
+    return max(1, total // 3)
+
+
 class LLMClient:
     def __init__(self, base_url: str | None = None, api_key: str | None = None):
         self.base_url = (base_url or LLM_BASE_URL).rstrip("/")
@@ -29,7 +43,7 @@ class LLMClient:
         self.session.trust_env = False
 
     def complete_text(self, messages: list[dict[str, Any]], options: CompletionOptions) -> str:
-        prompt_estimate = max(1, len(str(messages)) // 3)
+        prompt_estimate = _estimate_text_tokens(messages)
         available = max(LLM_MIN_COMPLETION_TOKENS, LLM_CONTEXT_WINDOW - prompt_estimate - LLM_CONTEXT_MARGIN_TOKENS)
         payload = {
             "model": options.model,

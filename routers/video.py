@@ -212,6 +212,7 @@ async def _create_video_task_impl(
     first_frame: UploadFile | None = File(None),
     last_frame: UploadFile | None = File(None),
     auto_polish: bool = False,
+    owner: str = "admin",
 ):
     first_content = await first_frame.read() if first_frame else None
     last_content = await last_frame.read() if last_frame else None
@@ -237,6 +238,7 @@ async def _create_video_task_impl(
         aspect_ratio=effective_aspect_ratio,
         seed=seed,
         warnings=warnings,
+        owner=owner,
         extras={"original_prompt": prompt.strip()} if auto_polish else None,
     )
     try:
@@ -274,6 +276,7 @@ async def _create_reference_video_task_impl(
     reference_videos: list[UploadFile] = File(default=[]),
     reference_audios: list[UploadFile] = File(default=[]),
     auto_polish: bool = False,
+    owner: str = "admin",
 ):
     validate_reference_counts(len(reference_images), len(reference_videos), len(reference_audios))
     validate_reference_uploads(reference_images, reference_videos, reference_audios)
@@ -315,6 +318,7 @@ async def _create_reference_video_task_impl(
         aspect_ratio=effective_aspect_ratio,
         seed=seed,
         warnings=warnings,
+        owner=owner,
         extras={
             "reference_counts": counts,
             "ref_image_size": ref_image_size,
@@ -363,11 +367,12 @@ async def create_video_task(
     ] = False,
     first_frame: UploadFile | None = File(None),
     last_frame: UploadFile | None = File(None),
+    access: dict = Depends(require_video_access),
 ):
     """直接使用提交的提示词生成；不含图片、仅首帧、仅尾帧、首尾帧共用同一工作流。"""
     return await _create_video_task_impl(
         prompt, duration, resolution_megapixels, aspect_ratio, seed, first_frame, last_frame,
-        polish_prompt_first,
+        polish_prompt_first, access["key_id"],
     )
 
 
@@ -396,11 +401,13 @@ async def create_reference_video_task(
     reference_images: list[UploadFile] = File(default=[]),
     reference_videos: list[UploadFile] = File(default=[]),
     reference_audios: list[UploadFile] = File(default=[]),
+    access: dict = Depends(require_video_access),
 ):
     """直接使用提交的六段式提示词，通过 R2V 工作流生成多模态参考视频。"""
     return await _create_reference_video_task_impl(
         prompt, duration, resolution_megapixels, aspect_ratio, seed, ref_image_size,
         use_video_audio, reference_images, reference_videos, reference_audios, polish_prompt_first,
+        access["key_id"],
     )
 
 
@@ -419,10 +426,10 @@ async def get_video_tasks(
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
     access: dict = Depends(require_video_access),
 ):
-    """不返回全局任务；管理员（X-Admin-Key）可查看全部任务，其他身份必须显式提交任务 ID。"""
+    """管理员可查看全部任务；其他身份（API Key / 注册用户）仅能看到自己创建的任务。"""
     if access["role"] == "admin":
         return {"tasks": video_service.list_tasks([], limit, include_all=True)}
-    return {"tasks": video_service.list_tasks(parse_task_ids(task_ids), limit)}
+    return {"tasks": video_service.list_tasks([], limit, owner=access["key_id"])}
 
 
 @router.get(
@@ -473,6 +480,8 @@ async def delete_video_task(task_id: str):
         raise HTTPException(status_code=409, detail=str(error))
     except (ValueError, FileNotFoundError):
         raise HTTPException(status_code=404, detail="视频任务不存在")
+    except OSError as error:
+        raise HTTPException(status_code=409, detail=f"删除失败，文件可能被占用：{error}")
     return Response(status_code=204)
 
 
@@ -489,7 +498,7 @@ async def get_video_queue(
     try:
         if access["role"] == "admin":
             return await run_in_threadpool(video_service.sanitized_queue, [], True)
-        return await run_in_threadpool(video_service.sanitized_queue, parse_task_ids(task_ids))
+        return await run_in_threadpool(video_service.sanitized_queue, [], False, access["key_id"])
     except Exception:
         raise HTTPException(status_code=502, detail="暂时无法获取生成队列，请稍后重试")
 
