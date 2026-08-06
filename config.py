@@ -9,17 +9,6 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = Path(os.getenv("VIDEO_SERVICE_CONFIG", PROJECT_ROOT / "config.yml")).resolve()
 
 
-def _deep_merge(base: dict, override: dict) -> dict:
-    """递归合并：override 中的 dict 与 base 同名键逐层合并，其余覆盖。"""
-    result = dict(base)
-    for key, value in override.items():
-        if isinstance(value, dict) and isinstance(result.get(key), dict):
-            result[key] = _deep_merge(result[key], value)
-        else:
-            result[key] = value
-    return result
-
-
 def _load_config() -> dict[str, Any]:
     try:
         data = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
@@ -27,14 +16,9 @@ def _load_config() -> dict[str, Any]:
         raise RuntimeError(f"配置文件不存在：{CONFIG_PATH}") from error
     if not isinstance(data, dict):
         raise RuntimeError("config.yml 顶层必须是对象")
-    # config.local.yml 与本机私密覆盖项（已被 .gitignore 忽略），
-    # 逐层合并到 config.yml 之上，用于存放 API Key、本机路径等不提交的配置。
-    local_path = CONFIG_PATH.with_name("config.local.yml")
-    if local_path.is_file():
-        local_data = yaml.safe_load(local_path.read_text(encoding="utf-8")) or {}
-        if not isinstance(local_data, dict):
-            raise RuntimeError("config.local.yml 顶层必须是对象")
-        data = _deep_merge(data, local_data)
+    # 全部配置（含 API Key、本机路径等私有项）统一放在 config.yml；
+    # config.yml 已被 .gitignore 忽略，不随仓库分发。
+    # 仓库内仅提供 config.example.yml 作为默认值范例。
     return data
 
 
@@ -115,6 +99,20 @@ COMFYUI_AUDIO_VAE = _setting(
     "COMFYUI_AUDIO_VAE",
     "minimax_h3_audio_vae_fp32.safetensors",
 )
+# NSFW 风格 Lora：仅应用于 fl2v 工作流（video_api.json），由 nsfw_strength
+# 参数（三档强度，见 nsfw_lora_levels）控制加载强度；多模态参考工作流不加载。
+# nsfw_lora_name 留空表示未配置，NSFW 风格 Lora 功能整体禁用（前端不渲染选项）。
+COMFYUI_NSFW_LORA_NAME = _setting(
+    "comfyui.lora.nsfw_lora_name",
+    "COMFYUI_NSFW_LORA_NAME",
+    "",
+)
+COMFYUI_NSFW_LORA_ENABLED = bool(COMFYUI_NSFW_LORA_NAME)
+COMFYUI_NSFW_LORA_LEVELS: list[float] = [
+    float(part)
+    for part in _setting("comfyui.lora.nsfw_lora_levels", "COMFYUI_NSFW_LORA_LEVELS", "0,0.3,0.5").split(",")
+    if part.strip()
+]
 
 LLM_BASE_URL = _setting("llm.base_url", "LLM_BASE_URL", "http://127.0.0.1:8000/v1")
 LLM_API_KEY = _setting("llm.api_key", "LLM_API_KEY", "")
@@ -127,8 +125,8 @@ LLM_CONTEXT_MARGIN_TOKENS = _setting(
 LLM_MIN_COMPLETION_TOKENS = _setting(
     "llm.min_completion_tokens", "LLM_MIN_COMPLETION_TOKENS", 512, int
 )
-# NSFW 破甲提示词：开启后润色系统提示词追加成人向放行指令（默认关闭，
-# 仅影响润色阶段，不体现在网页上）。
+# NSFW 破甲提示词开关：true 时润色系统提示词追加成人向放行指令，
+# 由该全局配置单独控制，与任务 nsfw_strength 无关（NSFW 风格指南仍按任务等级注入）。
 LLM_NSFW_ARMOR = _setting("llm.nsfw_armor", "LLM_NSFW_ARMOR", False, bool)
 
 VIDEO_DEFAULT_DURATION = _setting("video.duration.default", "VIDEO_DEFAULT_DURATION", 5, float)

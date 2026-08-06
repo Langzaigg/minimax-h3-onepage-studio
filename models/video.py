@@ -35,6 +35,7 @@ class VideoTaskSummary(BaseModel):
     reference_counts: dict[str, int] = Field(default_factory=dict)
     ref_image_size: str | None = None
     use_video_audio: bool | None = None
+    nsfw_strength: float | None = None
 
 
 class VideoTaskList(BaseModel):

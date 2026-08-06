@@ -125,6 +125,21 @@ def validate_reference_counts(images: int, videos: int, audios: int) -> None:
         raise HTTPException(status_code=400, detail="请至少上传一个参考图片、视频或音频")
 
 
+def validate_nsfw_strength(value: float) -> float:
+    """NSFW Lora 强度仅允许配置的三档（默认 0 / 0.3 / 0.5）。
+
+    该参数在 fl2v 工作流中生效；多模态参考生成接口同样接收并记录，
+    但不影响参考工作流（与前端“选项不禁用但不生效”的行为一致）。
+    未配置 nsfw lora（nsfw_lora_name 为空）时，仅允许 0，功能整体禁用。
+    """
+    allowed = video_service.COMFYUI_NSFW_LORA_LEVELS
+    if not any(abs(value - level) < 1e-9 for level in allowed):
+        raise HTTPException(status_code=400, detail=f"nsfw_strength 仅支持 {' / '.join(map(str, allowed))}")
+    if value > 0 and not video_service.COMFYUI_NSFW_LORA_ENABLED:
+        raise HTTPException(status_code=400, detail="未配置 NSFW 风格 Lora（comfyui.lora.nsfw_lora_name 为空），nsfw_strength 仅支持 0")
+    return value
+
+
 def validate_reference_uploads(
     images: list[UploadFile], videos: list[UploadFile], audios: list[UploadFile]
 ) -> None:
@@ -143,9 +158,13 @@ def validate_reference_uploads(
 async def prompt_polish(
     prompt: Annotated[str, Form(min_length=1)],
     duration: Annotated[float, Form(ge=VIDEO_MIN_DURATION, le=VIDEO_MAX_DURATION)] = VIDEO_DEFAULT_DURATION,
+    nsfw_strength: Annotated[
+        float, Form(description="NSFW 风格 Lora 强度，仅支持 0 / 0.3 / 0.5；>0 时润色注入 NSFW 风格指南")
+    ] = 0.0,
     first_frame: UploadFile | None = File(None),
     last_frame: UploadFile | None = File(None),
 ):
+    validate_nsfw_strength(nsfw_strength)
     paths: list[Path] = []
     try:
         for upload in (first_frame, last_frame):
@@ -153,7 +172,9 @@ async def prompt_polish(
             if path:
                 paths.append(path)
         mode = derive_mode(first_frame is not None, last_frame is not None)
-        result = await run_in_threadpool(video_service.polish_prompt, prompt, mode, duration, paths)
+        result = await run_in_threadpool(
+            video_service.polish_prompt, prompt, mode, duration, paths, nsfw_strength
+        )
         return {"prompt": result, "model": video_service.VIDEO_MODEL, "mode": mode}
     except HTTPException:
         raise
@@ -168,11 +189,15 @@ async def prompt_polish(
 async def reference_prompt_polish(
     prompt: Annotated[str, Form(min_length=1)],
     duration: Annotated[float, Form(ge=VIDEO_MIN_DURATION, le=VIDEO_MAX_DURATION)] = VIDEO_DEFAULT_DURATION,
+    nsfw_strength: Annotated[
+        float, Form(description="NSFW 风格 Lora 强度，仅支持 0 / 0.3 / 0.5；参考模式不加载 lora，但 >0 时润色仍注入 NSFW 风格指南")
+    ] = 0.0,
     use_video_audio: Annotated[bool, Form()] = True,
     reference_images: list[UploadFile] = File(default=[]),
     reference_videos: list[UploadFile] = File(default=[]),
     reference_audios: list[UploadFile] = File(default=[]),
 ):
+    validate_nsfw_strength(nsfw_strength)
     validate_reference_counts(len(reference_images), len(reference_videos), len(reference_audios))
     validate_reference_uploads(reference_images, reference_videos, reference_audios)
     groups: list[list[tuple[Path, str]]] = []
@@ -187,6 +212,7 @@ async def reference_prompt_polish(
             [path for path, _ in groups[1]],
             [path for path, _ in groups[2]],
             use_video_audio,
+            nsfw_strength,
         )
         return {"prompt": result, "model": video_service.VIDEO_MODEL, "mode": "reference_to_video"}
     except HTTPException:
@@ -213,7 +239,9 @@ async def _create_video_task_impl(
     last_frame: UploadFile | None = File(None),
     auto_polish: bool = False,
     owner: str = "admin",
+    nsfw_strength: float = 0.0,
 ):
+    validate_nsfw_strength(nsfw_strength)
     first_content = await first_frame.read() if first_frame else None
     last_content = await last_frame.read() if last_frame else None
     mode = derive_mode(bool(first_content), bool(last_content))
@@ -228,6 +256,9 @@ async def _create_video_task_impl(
         warnings.append("首帧与末帧画面比例不一致，生成时会按所选比例居中裁剪。")
     effective_aspect_ratio, ratio = resolve_aspect_ratio(aspect_ratio, first_ratio, last_ratio)
     width, height = dimensions(resolution_megapixels, ratio)
+    extras = {"nsfw_strength": nsfw_strength}
+    if auto_polish:
+        extras["original_prompt"] = prompt.strip()
     record = video_service.create_task_record(
         mode=mode,
         prompt=prompt.strip(),
@@ -239,7 +270,7 @@ async def _create_video_task_impl(
         seed=seed,
         warnings=warnings,
         owner=owner,
-        extras={"original_prompt": prompt.strip()} if auto_polish else None,
+        extras=extras,
     )
     try:
         for name, upload, content in (
@@ -277,7 +308,11 @@ async def _create_reference_video_task_impl(
     reference_audios: list[UploadFile] = File(default=[]),
     auto_polish: bool = False,
     owner: str = "admin",
+    nsfw_strength: float = 0.0,
 ):
+    # 参考生成接口同样接收 nsfw_strength（前端选项不禁用），
+    # 但仅记录到任务元数据，不应用于参考工作流（NSFW Lora 只作用于 fl2v 工作流）。
+    validate_nsfw_strength(nsfw_strength)
     validate_reference_counts(len(reference_images), len(reference_videos), len(reference_audios))
     validate_reference_uploads(reference_images, reference_videos, reference_audios)
     if aspect_ratio != "auto" and aspect_ratio not in ASPECT_RATIOS:
@@ -323,6 +358,7 @@ async def _create_reference_video_task_impl(
             "reference_counts": counts,
             "ref_image_size": ref_image_size,
             "use_video_audio": use_video_audio,
+            "nsfw_strength": nsfw_strength,
             "_reference_assets": [],
             **({"original_prompt": prompt.strip()} if auto_polish else {}),
         },
@@ -365,6 +401,9 @@ async def create_video_task(
     polish_prompt_first: Annotated[
         bool, Form(description="默认 false 直接生成；true 时先用配置的视觉模型润色，再自动生成")
     ] = False,
+    nsfw_strength: Annotated[
+        float, Form(description="NSFW 风格 Lora 强度，仅支持 0 / 0.3 / 0.5 三档，仅在 fl2v 工作流生效")
+    ] = 0.0,
     first_frame: UploadFile | None = File(None),
     last_frame: UploadFile | None = File(None),
     access: dict = Depends(require_video_access),
@@ -372,7 +411,7 @@ async def create_video_task(
     """直接使用提交的提示词生成；不含图片、仅首帧、仅尾帧、首尾帧共用同一工作流。"""
     return await _create_video_task_impl(
         prompt, duration, resolution_megapixels, aspect_ratio, seed, first_frame, last_frame,
-        polish_prompt_first, access["key_id"],
+        polish_prompt_first, access["key_id"], nsfw_strength,
     )
 
 
@@ -396,6 +435,9 @@ async def create_reference_video_task(
     polish_prompt_first: Annotated[
         bool, Form(description="默认 false 直接生成；true 时先生成六段式参考提示词，再自动生成")
     ] = False,
+    nsfw_strength: Annotated[
+        float, Form(description="NSFW 风格 Lora 强度，仅支持 0 / 0.3 / 0.5 三档；参考模式仅记录不生效")
+    ] = 0.0,
     ref_image_size: Annotated[str, Form()] = "match",
     use_video_audio: Annotated[bool, Form()] = True,
     reference_images: list[UploadFile] = File(default=[]),
@@ -407,7 +449,7 @@ async def create_reference_video_task(
     return await _create_reference_video_task_impl(
         prompt, duration, resolution_megapixels, aspect_ratio, seed, ref_image_size,
         use_video_audio, reference_images, reference_videos, reference_audios, polish_prompt_first,
-        access["key_id"],
+        access["key_id"], nsfw_strength,
     )
 
 

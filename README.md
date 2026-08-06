@@ -197,18 +197,7 @@ $env:VIDEO_SERVICE_CONFIG = 'D:\config\minimax-h3-studio.yml'
 ```
 
 > [!IMPORTANT]
-> **私密配置请写在 `config.local.yml`**（与 `config.yml` 同目录，已被 `.gitignore` 忽略，不会提交到版本库）。该文件会逐层合并覆盖 `config.yml`：API Key、本机 ffmpeg 路径、本机部署开关（如 `comfyui.spectrum_apply.enabled: true`）等都应放在这里。提交前请用 `git grep` 检查敏感信息（例如 `git grep -n "sk-\|api_key"`）。
-
-```yaml
-# config.local.yml 示例（不提交）
-llm:
-  api_key: "your-secret-key"
-ffmpeg:
-  path: "C:/path/to/ffmpeg.exe"
-comfyui:
-  spectrum_apply:
-    enabled: true
-```
+> **`config.yml` 已被 `.gitignore` 忽略，不会提交到版本库**——所有配置（包括 API Key、管理员密钥、本机 ffmpeg 路径、部署开关等私有项）统一写在 `config.yml`。仓库内仅提供 [`config.example.yml`](config.example.yml) 作为默认值范例：新环境复制它为 `config.yml` 后按需修改即可。提交前请用 `git grep` 检查敏感信息（例如 `git grep -n "sk-\|api_key"`）。
 
 生产环境常用覆盖项：
 
@@ -265,6 +254,21 @@ git clone https://github.com/xmarre/ComfyUI-Spectrum-MiniMax-H3.git
 
 Spectrum 通过对隐藏特征做 Chebyshev 岭回归预测来跳过部分 transformer 评估，从而加速采样，属于近似加速而非无损执行；`enabled` 关闭时原生逐帧采样。注意 README 顶部的示例 Gif 与安全建议：加速会改变去噪轨迹，质量敏感场景请同种子对比。
 
+## NSFW 风格 Lora
+
+`comfyui.lora.nsfw_lora_name`（默认 `PinkFluffyBunny-alpha-lora.safetensors`）指定的 Lora 通过任务参数 `nsfw_strength` 控制强度，仅支持配置的三档（默认 `0 / 0.3 / 0.5`）：
+
+| `nsfw_strength` | 行为 |
+|---|---|
+| `0`（默认） | 工作流完全不含 Lora 节点，不加载 Lora 文件 |
+| `0.3` / `0.5` | fl2v 工作流在 UNETLoader 与 Spectrum/调度器之间插入 `LoraLoader` 节点，model 与 clip 均应用该强度 |
+
+约束：
+
+- **仅应用于 fl2v 工作流**（文本/首帧/尾帧/首尾帧生成）；多模态参考生成接口同样接收该参数并记录到任务元数据，但**不应用于** Ref2VA 工作流（前端选项不禁用，选择后不生效）。
+- Lora 文件需位于 ComfyUI `models/loras/` 目录；强度为 `0` 时完全不加载，避免大文件占显存。
+- 强度档位可在 `comfyui.lora.nsfw_lora_levels` 调整（逗号分隔，必须包含 `0`）。
+
 ## 视频转 GIF 下载
 
 配置 `ffmpeg.path`（ffmpeg.exe 绝对路径，或安装 `pip install imageio-ffmpeg` 后使用其自带静态二进制）后，前端详情页会对已完成视频显示「下载 GIF」按钮，服务端使用 palette 方式将视频转为 ≤480px 的循环 GIF 并缓存：
@@ -295,8 +299,11 @@ curl -X POST http://127.0.0.1:7788/api/video/tasks \
   -F "resolution_megapixels=0.4" \
   -F "aspect_ratio=auto" \
   -F "polish_prompt_first=true" \
+  -F "nsfw_strength=0.3" \
   -F "first_frame=@first.png"
 ```
+
+`nsfw_strength` 可选，仅支持 `0 / 0.3 / 0.5` 三档，默认 `0`；仅在 fl2v 工作流生效（详见上文「NSFW 风格 Lora」）。
 
 ### 创建多模态参考任务
 
@@ -313,6 +320,8 @@ curl -X POST http://127.0.0.1:7788/api/video/reference-tasks \
   -F "reference_videos=@motion.mp4" \
   -F "reference_audios=@music.wav"
 ```
+
+注意：参考生成接口同样接受 `nsfw_strength`（仅记录到任务元数据），但 NSFW Lora 不应用于 Ref2VA 工作流。
 
 ### 查询进度与结果
 

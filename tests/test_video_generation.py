@@ -30,7 +30,7 @@ def test_shared_workflow_prunes_optional_frame_branches():
     reference = _workflow("reference_to_video", "reference prompt", 608, 352, 5, 456)
     assert reference["136"]["class_type"] == "MiniMaxH3ReferenceToVideo"
     assert reference["127"]["inputs"]["unet_name"] == "minimax_h3_ref2va_pruned_int8_convrot.safetensors"
-    assert reference["128"]["inputs"]["clip_name"] == "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
+    assert reference["128"]["inputs"]["clip_name"] == video_generation.COMFYUI_TEXT_ENCODER
     assert reference["136"]["inputs"]["prompt"] == "reference prompt"
 
 
@@ -77,6 +77,47 @@ def test_workflow_model_filenames_are_configurable(monkeypatch):
     assert reference["128"]["inputs"]["clip_name"] == "custom_clip.safetensors"
     assert reference["119"]["inputs"]["vae_name"] == "custom_video_vae.safetensors"
     assert reference["120"]["inputs"]["vae_name"] == "custom_audio_vae.safetensors"
+
+
+def test_nsfw_lora_applies_only_to_fl2v_workflow(monkeypatch):
+    monkeypatch.setattr(video_generation, "COMFYUI_NSFW_LORA_NAME", "PinkFluffyBunny-alpha-lora.safetensors")
+    # 0 档（关闭）：不插入 Lora 节点，模型保持 6 → 150 直连。
+    plain = _workflow("text_to_video", "prompt", 608, 352, 5, 1, nsfw_strength=0.0)
+    assert "151" not in plain
+    assert plain["150"]["inputs"]["model"] == ["6", 0]
+    assert plain["104"]["inputs"]["clip"] == ["13", 0]
+
+    # 0.3 档：fl2v 工作流插入 LoraLoader，串在 UNETLoader(6) 与 Spectrum(150) 之间，
+    # clip 改为 Lora 输出（13 → 151 → 104）。
+    workflow = _workflow("text_to_video", "prompt", 608, 352, 5, 1, nsfw_strength=0.3)
+    lora = workflow["151"]
+    assert lora["class_type"] == "LoraLoader"
+    assert lora["inputs"]["lora_name"] == "PinkFluffyBunny-alpha-lora.safetensors"
+    assert lora["inputs"]["model"] == ["6", 0]
+    assert lora["inputs"]["clip"] == ["13", 0]
+    assert lora["inputs"]["strength_model"] == 0.3
+    assert lora["inputs"]["strength_clip"] == 0.3
+    assert workflow["150"]["inputs"]["model"] == ["151", 0]
+    assert workflow["104"]["inputs"]["clip"] == ["151", 1]
+
+    # 0.5 档：强度随参数变化。
+    strong = _workflow("first_last_frame", "prompt", 608, 352, 5, 1, nsfw_strength=0.5)
+    assert strong["151"]["inputs"]["strength_model"] == 0.5
+    assert strong["151"]["inputs"]["strength_clip"] == 0.5
+
+    # 参考生成模式：即使传入强度也不插入 Lora 节点（选项保留但不生效）。
+    reference = _workflow("reference_to_video", "prompt", 608, 352, 5, 1, nsfw_strength=0.5)
+    assert "151" not in reference
+    assert reference["150"]["inputs"]["model"] == ["127", 0]
+
+
+def test_nsfw_lora_wiring_without_spectrum(monkeypatch):
+    monkeypatch.setattr(video_generation, "COMFYUI_SPECTRUM_ENABLED", False)
+    workflow = _workflow("text_to_video", "prompt", 608, 352, 5, 1, nsfw_strength=0.3)
+    assert "150" not in workflow
+    assert workflow["9"]["inputs"]["model"] == ["151", 0]
+    assert workflow["16"]["inputs"]["model"] == ["151", 0]
+    assert workflow["104"]["inputs"]["clip"] == ["151", 1]
 
 
 def test_public_task_hides_generation_backend_identifiers():

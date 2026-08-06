@@ -1,7 +1,6 @@
 # MiniMax H3 视频服务配置模板
 # 用法：复制本文件为 config.yml 后按需修改（config.yml 已被 .gitignore 忽略，不会提交）。
-# 私密项（API Key、管理员密钥、本机 ffmpeg 路径、本机开关等）建议写在 config.local.yml，
-# 该文件同样被 .gitignore 忽略；config.local.yml 会逐层覆盖 config.yml 的同名配置。
+# 所有配置（含 API Key、管理员密钥、本机 ffmpeg 路径等私有项）统一写入 config.yml。
 
 server:
   host: 0.0.0.0
@@ -28,6 +27,12 @@ comfyui:
   # 采样加速（Spectrum Apply MiniMax H3），默认不启用；启用需在 ComfyUI 安装对应自定义节点
   spectrum_apply:
     enabled: false
+  # NSFW 风格 Lora：由任务参数 nsfw_strength（三档强度）控制，仅应用于 fl2v 工作流；
+  # 多模态参考生成模式不加载。nsfw_lora_name 留空（""）表示未配置，该功能整体禁用，
+  # 前端不渲染 NSFW 强度选项。nsfw_lora_levels 为允许的三档强度（逗号分隔，必须包含 0）。
+  lora:
+    nsfw_lora_name: ""
+    nsfw_lora_levels: "0,0.3,0.5"
 
 llm:
   base_url: "http://127.0.0.1:8000/v1"

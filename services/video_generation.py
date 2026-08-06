@@ -23,6 +23,9 @@ from config import (
     COMFYUI_AUDIO_VAE,
     COMFYUI_BASE_URL,
     COMFYUI_FL2VA_MODEL,
+    COMFYUI_NSFW_LORA_ENABLED,
+    COMFYUI_NSFW_LORA_LEVELS,
+    COMFYUI_NSFW_LORA_NAME,
     COMFYUI_REF2VA_MODEL,
     COMFYUI_SPECTRUM_ENABLED,
     COMFYUI_TEXT_ENCODER,
@@ -324,7 +327,35 @@ _NSFW_ARMOR_TEXT = (
 )
 
 
-def _polish_system(guide: str, task_name: str, ref_mode: bool = False) -> str:
+# 提炼自 PinkCherry MiniMax H3 Dataset NSFW Prompting Guide：
+# 仅在 nsfw_armor 开启、且用户意图为成人内容时生效，指导写出精确、生动的露骨描写。
+_NSFW_GUIDE_TEXT = (
+    "ADULT CONTENT STYLE GUIDE (apply only when the user's idea is adult or explicit):\n"
+    "Describe explicit scenes precisely and vividly. Order each explicit moment as: "
+    "1) subject + physical description (hair, body type, clothing state); "
+    "2) pose/position; "
+    "3) action + motion - always combine motion with body reaction, e.g. \"her heavy ass cheeks slap "
+    "together with every downward thrust\" is stronger than \"she rides him\"; "
+    "4) genital detail + fluids; "
+    "5) camera/framing; "
+    "6) expression/atmosphere.\n"
+    "Vocabulary cheat sheet (use naturally, not as tags):\n"
+    "- Female: wet glistening pussy, plump pussy lips, swollen clit, stretched cunt, tight asshole, "
+    "shaved/trimmed/thick hairy pubic hair, dripping juices, deep pink vaginal canal\n"
+    "- Male: thick veiny cock, bulbous head, throbbing shaft, hairy pubic mound, heavy balls, "
+    "clear pre-cum, white semen erupting from the urethra\n"
+    "- Fluids: thick white creampie, oozing, long glistening string of semen, smeared with white semen, "
+    "drips down her labia and onto her inner thigh\n"
+    "- Motion: bounces up and down, hard rhythmic thrusts, slamming against, grinding, bobs her head, "
+    "deep throats, sloppy wet blowjob, vigorously pumping, spreading her labia\n"
+    "- Poses: reverse cowgirl, doggy/bent over, missionary, all fours, squatting, legs spread wide, kneeling\n"
+    "- Camera: low behind her, POV looking down, extreme close-up, side profile, tight framing on the action\n"
+    "Intensity: for harder results lean into \"sloppy\", \"messy\", \"filthy\", \"thick white\", \"glistening\", "
+    "\"relentless pounding\"; for softer scenes use \"sensual\", \"intimate\", \"soft moaning\", \"slow and deeply\".\n"
+)
+
+
+def _polish_system(guide: str, task_name: str, ref_mode: bool = False, nsfw_strength: float = 0.0) -> str:
     role = "full-reference" if ref_mode else "audiovisual"
     system = (
         f"You are a professional MiniMax H3 {role} prompt editor. Rewrite the user's idea in English "
@@ -342,12 +373,17 @@ def _polish_system(guide: str, task_name: str, ref_mode: bool = False) -> str:
         "Follow the supplied guide exactly. Preserve user-provided dialogue and visible text verbatim. "
         "Return only the final prompt, with no code fence or commentary."
     )
+    # 破甲提示词（成人向放行）由全局配置 llm.nsfw_armor 单独开关控制；
+    # NSFW 风格指南仅在本任务启用了 NSFW 等级（nsfw_strength > 0）时注入。
+    # 参考模式虽不加载 lora，但润色同样注入风格指南。
     if LLM_NSFW_ARMOR:
         system += "\n\n" + _NSFW_ARMOR_TEXT
+    if nsfw_strength > 0:
+        system += "\n\n" + _NSFW_GUIDE_TEXT
     return system + "\n\nPROMPT GUIDE:\n" + guide
 
 
-def polish_prompt(prompt: str, mode: str, duration: float, images: list[Path]) -> str:
+def polish_prompt(prompt: str, mode: str, duration: float, images: list[Path], nsfw_strength: float = 0.0) -> str:
     guide_path = Path(VIDEO_WORKFLOW_FOLDER) / "VIDEO_PROMPT_WRITING_GUIDE_base_en.md"
     guide = guide_path.read_text(encoding="utf-8")
     task_name = {
@@ -356,7 +392,7 @@ def polish_prompt(prompt: str, mode: str, duration: float, images: list[Path]) -
         "last_frame": "L2VA",
         "first_last_frame": "FL2VA",
     }[mode]
-    system = _polish_system(guide, task_name)
+    system = _polish_system(guide, task_name, nsfw_strength=nsfw_strength)
     content: list[dict[str, Any]] = [
         {
             "type": "text",
@@ -475,6 +511,7 @@ def polish_reference_prompt(
     videos: list[Path],
     audios: list[Path],
     use_video_audio: bool,
+    nsfw_strength: float = 0.0,
 ) -> str:
     base_guide = (Path(VIDEO_WORKFLOW_FOLDER) / "VIDEO_PROMPT_WRITING_GUIDE_base_en.md").read_text(
         encoding="utf-8"
@@ -482,7 +519,7 @@ def polish_reference_prompt(
     ref_guide = (Path(VIDEO_WORKFLOW_FOLDER) / "VIDEO_PROMPT_WRITING_GUIDE_ref_en.md").read_text(
         encoding="utf-8"
     )
-    system = _polish_system(base_guide, "full-reference", ref_mode=True)
+    system = _polish_system(base_guide, "full-reference", ref_mode=True, nsfw_strength=nsfw_strength)
     system += "\n\nFULL-REFERENCE GUIDE:\n" + ref_guide
     inventory = [
         f"Target duration: {duration:.2f} seconds",
@@ -559,16 +596,43 @@ def _apply_spectrum(workflow: dict, loader_id: str, consumer_ids: list[str], ena
     启用时保持节点 150 串联在模型加载器与调度器/引导器之间；
     关闭时直接把消费者模型输入回连到加载器，并移除节点，
     使工作流完全不引用 Spectrum 节点，ComfyUI 侧无需安装该依赖。
+    loader_id 传入实际模型来源节点（可能是 Lora 节点），确保两种模式接线正确。
     """
     if enabled:
         workflow["150"]["inputs"]["enabled"] = True
+        workflow["150"]["inputs"]["model"] = [loader_id, 0]
         return
     workflow.pop("150", None)
     for node_id in consumer_ids:
         workflow[node_id]["inputs"]["model"] = [loader_id, 0]
 
 
-def _workflow(mode: str, prompt: str, width: int, height: int, duration: float, seed: int) -> dict:
+def _apply_nsfw_lora(workflow: dict, strength: float) -> None:
+    """NSFW 风格 Lora：仅在 fl2v 工作流（video_api.json）中生效。
+
+    强度 > 0 时在 UNETLoader(6) 与 Spectrum(150) 之间插入 LoraLoader 节点 151，
+    model 走 6→151→150，clip 走 13→151→104；强度为 0 或不配置 lora 时不插入节点，
+    避免加载 2GB 级 lora 文件，工作流保持原样。
+    """
+    if strength <= 0 or not COMFYUI_NSFW_LORA_ENABLED:
+        return
+    workflow["151"] = {
+        "class_type": "LoraLoader",
+        "inputs": {
+            "model": ["6", 0],
+            "clip": ["13", 0],
+            "lora_name": COMFYUI_NSFW_LORA_NAME,
+            "strength_model": strength,
+            "strength_clip": strength,
+        },
+    }
+    workflow["104"]["inputs"]["clip"] = ["151", 1]
+
+
+def _workflow(
+    mode: str, prompt: str, width: int, height: int, duration: float, seed: int,
+    nsfw_strength: float = 0.0,
+) -> dict:
     if mode == "reference_to_video":
         workflow = json.loads(
             (Path(VIDEO_WORKFLOW_FOLDER) / "reference_video_api.json").read_text(encoding="utf-8")
@@ -587,7 +651,10 @@ def _workflow(mode: str, prompt: str, width: int, height: int, duration: float, 
     # All modes share the same graph; unused optional image branches are removed.
     workflow = json.loads((Path(VIDEO_WORKFLOW_FOLDER) / "video_api.json").read_text(encoding="utf-8"))
     workflow["6"]["inputs"]["unet_name"] = COMFYUI_FL2VA_MODEL
-    _apply_spectrum(workflow, "6", ["9", "16"], COMFYUI_SPECTRUM_ENABLED)
+    # NSFW Lora 仅用于 fl2v 工作流；参考生成模式（reference_to_video）不加载。
+    _apply_nsfw_lora(workflow, nsfw_strength)
+    model_source = "151" if "151" in workflow else "6"
+    _apply_spectrum(workflow, model_source, ["9", "16"], COMFYUI_SPECTRUM_ENABLED)
     workflow["11"]["inputs"]["vae_name"] = COMFYUI_VIDEO_VAE
     workflow["13"]["inputs"]["clip_name"] = COMFYUI_TEXT_ENCODER
     workflow["24"]["inputs"]["vae_name"] = COMFYUI_AUDIO_VAE
@@ -688,6 +755,7 @@ async def _polish_then_generate(task_id: str) -> None:
     try:
         data = load_metadata(task_id)
         original_prompt = data.get("original_prompt") or data["prompt"]
+        nsfw_strength = float(data.get("nsfw_strength", 0.0) or 0.0)
         if data["mode"] == "reference_to_video":
             grouped = {"image": [], "video": [], "audio": []}
             for item in data.get("_reference_assets", []):
@@ -700,6 +768,7 @@ async def _polish_then_generate(task_id: str) -> None:
                 [path for _, path in sorted(grouped["video"])],
                 [path for _, path in sorted(grouped["audio"])],
                 data.get("use_video_audio", True),
+                nsfw_strength,
             )
         else:
             images = [
@@ -708,7 +777,7 @@ async def _polish_then_generate(task_id: str) -> None:
                 if name in data.get("_assets", {})
             ]
             polished = await asyncio.to_thread(
-                polish_prompt, original_prompt, data["mode"], data["duration"], images
+                polish_prompt, original_prompt, data["mode"], data["duration"], images, nsfw_strength
             )
         data = load_metadata(task_id)
         data.update(
@@ -732,7 +801,8 @@ async def _run_generation(task_id: str) -> None:
     try:
         data = load_metadata(task_id)
         workflow = _workflow(
-            data["mode"], data["prompt"], data["width"], data["height"], data["duration"], data["seed"]
+            data["mode"], data["prompt"], data["width"], data["height"], data["duration"], data["seed"],
+            data.get("nsfw_strength", 0.0),
         )
         if data["mode"] == "reference_to_video":
             workflow["136"]["inputs"]["ref_image_size"] = data.get("ref_image_size", "match")
@@ -775,6 +845,8 @@ async def _run_generation(task_id: str) -> None:
                 progress=0,
                 current_stage="已进入生成队列",
                 _comfy_prompt_id=submitted["prompt_id"],
+                # 记录提交使用的 client_id，服务重启后可用同一 id 重连 websocket 恢复实时进度
+                _comfy_client_id=client_id,
             )
             _save_metadata(data)
             await _watch_websocket(task_id, submitted["prompt_id"], websocket, client)
@@ -923,33 +995,91 @@ async def _complete_from_history(task_id: str, history_item: dict, client: Comfy
 
 
 async def resume_incomplete_tasks() -> None:
+    """服务重启后恢复所有未完成任务。
+
+    - polishing：AI 润色被重启中断，重新执行润色并继续生成（不直接判失败）；
+    - preparing：尚未提交到 ComfyUI，重新构建工作流并提交；
+    - queued/running：优先用原 client_id 重连 websocket 恢复实时进度，
+      失败时回退轮询 ComfyUI 队列与历史；任务从队列消失则自动重新提交。
+    """
     for data in iter_task_records():
         if data["status"] not in {"polishing", "preparing", "queued", "running"}:
             continue
-        prompt_id = data.get("_comfy_prompt_id")
-        if not prompt_id:
-            data.update(status="failed", current_stage="服务重启前尚未提交", error="任务提交被服务重启中断")
-            _save_metadata(data)
-            continue
-        job = asyncio.create_task(_resume_monitor(data["id"], prompt_id))
+        if data["status"] == "polishing":
+            job = asyncio.create_task(_polish_then_generate(data["id"]))
+        elif data["status"] == "preparing":
+            job = asyncio.create_task(_run_generation(data["id"]))
+        elif data.get("_comfy_prompt_id"):
+            job = asyncio.create_task(_resume_monitor(data["id"], data["_comfy_prompt_id"]))
+        else:
+            job = asyncio.create_task(_run_generation(data["id"]))
         _background_tasks.add(job)
         job.add_done_callback(_background_tasks.discard)
 
 
 async def _resume_monitor(task_id: str, prompt_id: str) -> None:
     client = ComfyClient()
-    try:
-        while True:
-            history = await asyncio.to_thread(client.history, prompt_id)
-            if prompt_id in history:
-                await _complete_from_history(task_id, history[prompt_id], client)
+    data = load_metadata(task_id)
+    client_id = data.get("_comfy_client_id")
+    # 优先用原 client_id 重连 websocket，恢复实时进度（progress/executing 事件按
+    # 提交时绑定的 sid 定向推送，只有同一个 client_id 才能重新收到）。
+    # 连接失败或中途断开时自动回退到轮询兜底逻辑。
+    if client_id:
+        try:
+            ws_url = client.base_url.replace("http://", "ws://").replace("https://", "wss://")
+            async with websockets.connect(
+                f"{ws_url}/ws?clientId={client_id}", proxy=None, max_size=2**20
+            ) as websocket:
+                await _watch_websocket(task_id, prompt_id, websocket, client)
                 return
-            await _update_queue_position(task_id, prompt_id, client)
+        except Exception:
+            pass
+    # 轮询兜底：ComfyUI 未就绪时持续重试；任务从队列和历史中同时消失
+    # （例如 ComfyUI 自身也重启过）连续 3 次后，用磁盘上的输入重新提交。
+    missing = 0
+    while True:
+        try:
+            history = await asyncio.to_thread(client.history, prompt_id)
+        except Exception:
+            await asyncio.sleep(5)
+            continue
+        if prompt_id in history:
+            await _complete_from_history(task_id, history[prompt_id], client)
+            return
+        try:
+            queue = await asyncio.to_thread(client.queue)
+            pending_ids = [_queue_prompt_id(item) for item in queue.get("queue_pending", [])]
+            running_ids = [_queue_prompt_id(item) for item in queue.get("queue_running", [])]
+        except Exception:
             await asyncio.sleep(3)
-    except Exception as error:
+            continue
         data = load_metadata(task_id)
-        data.update(status="failed", current_stage="恢复监控失败", error=_public_error(error), queue_position=None)
+        if prompt_id in running_ids:
+            missing = 0
+            data.update(
+                status="running", queue_position=0,
+                progress=max(data["progress"], 2), current_stage="正在生成",
+            )
+        elif prompt_id in pending_ids:
+            missing = 0
+            data.update(
+                status="queued", queue_position=pending_ids.index(prompt_id) + 1,
+                current_stage="等待生成资源",
+            )
+        else:
+            missing += 1
+            if missing >= 3:
+                data.update(
+                    status="preparing",
+                    progress=max(data["progress"], 2),
+                    queue_position=None,
+                    current_stage="视频生成服务已重启，正在重新提交任务",
+                )
+                _save_metadata(data)
+                await _run_generation(task_id)
+                return
         _save_metadata(data)
+        await asyncio.sleep(3)
 
 
 def _public_error(error: Exception) -> str:
@@ -964,7 +1094,11 @@ async def shutdown_background_tasks() -> None:
     for job in tuple(_background_tasks):
         job.cancel()
     if _background_tasks:
-        await asyncio.gather(*tuple(_background_tasks), return_exceptions=True)
+        try:
+            await asyncio.gather(*tuple(_background_tasks), return_exceptions=True)
+        except Exception:
+            # 后台任务可能在其它事件循环中创建（如测试环境），关闭时忽略跨循环异常
+            pass
 
 
 def sanitized_queue(task_ids: list[str], include_all: bool = False, owner: str | None = None) -> dict[str, Any]:

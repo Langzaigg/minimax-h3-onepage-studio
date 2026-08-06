@@ -11,9 +11,10 @@ access_data/*
 
 .env
 .env.*
-config.local.yml
 config.yml
 start_service.bat
+.git*.bak/
+.git.recover/
 .workbuddy/
 Thumbs.db
 .DS_Store

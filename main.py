@@ -8,6 +8,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from config import (
     ACCESS_MODE,
+    COMFYUI_NSFW_LORA_ENABLED,
     DAILY_STORAGE_CHECK_HOUR,
     DAILY_STORAGE_CHECK_MINUTE,
     FFMPEG_PATH,
@@ -153,6 +154,7 @@ async def frontend_config():
         },
         "ffmpeg_enabled": bool(FFMPEG_PATH),
         "access_mode": ACCESS_MODE,
+        "nsfw_lora_enabled": bool(COMFYUI_NSFW_LORA_ENABLED),
     }
 
 
