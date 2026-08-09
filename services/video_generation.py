@@ -273,19 +273,39 @@ def save_reference_asset(
     return path
 
 
+# Qwen3-VL 视觉参数（官方文档）：视觉压缩比 32×32 像素 = 1 visual token，
+# 推荐单图视觉 token 预算 256~1280（约 0.26MP~1.31MP），默认上限 16384/图。
+# 据此定压缩阈值与目标：
+# - 单图目标最长边 1280px ≈ 1.31MP ≈ 1280 tokens（官方推荐预算上限，细节保留充分）
+# - 多图目标每张最长边 896px ≈ 0.80MP ≈ 768 tokens/张（3 张约 2300 tokens，均摊预算）
 POLISH_IMAGE_RAW_LIMIT_BYTES = 10 * 1024 * 1024
-POLISH_IMAGE_MAX_SIDE = 1080
+POLISH_IMAGE_MAX_SIDE_SINGLE = 1280
+POLISH_IMAGE_MAX_SIDE_MULTI = 896
+# 上传给 H3（ComfyUI）的图片最长边上限；工作流内部还会缩放到 0.4MP（约 832×512），
+# 1280px 内上传可避免 VAE 处理超大图占用显存。
+H3_IMAGE_MAX_SIDE = 1280
 
 
-def _polish_image_data_url(path: Path) -> str:
+def _polish_image_data_url(path: Path, total_images: int = 1) -> str:
     """构造润色模型用的图片 data URL。
 
-    10MB 以内的图片按原样嵌入（常见的 1MB 参考图不压缩，保留细节）；
-    超过 10MB 的图片压缩到 1080p 以内，避免请求体过大导致模型输出被截断。
+    按 Qwen3-VL 视觉参数（每 32×32 像素 = 1 visual token，推荐单图 256~1280 tokens）：
+    - 单图目标最长边 1280px（≈1280 tokens）
+    - 多图目标每张最长边 896px（≈768 tokens/张）
+    图片最长边超过目标边长或文件超过 10MB 时压缩后嵌入，避免请求体过大导致输出被截断。
     """
+    max_side = POLISH_IMAGE_MAX_SIDE_SINGLE if total_images <= 1 else POLISH_IMAGE_MAX_SIDE_MULTI
     if path.stat().st_size <= POLISH_IMAGE_RAW_LIMIT_BYTES:
-        mime = mimetypes.guess_type(path.name)[0] or "image/png"
-        return f"data:{mime};base64,{base64.b64encode(path.read_bytes()).decode('ascii')}"
+        try:
+            from PIL import Image
+
+            with Image.open(path) as probe:
+                width, height = probe.size
+        except Exception:
+            width, height = 0, 0
+        if max(width, height) <= max_side:
+            mime = mimetypes.guess_type(path.name)[0] or "image/png"
+            return f"data:{mime};base64,{base64.b64encode(path.read_bytes()).decode('ascii')}"
     from io import BytesIO
 
     from PIL import Image
@@ -300,7 +320,7 @@ def _polish_image_data_url(path: Path) -> str:
         else:
             image = image.convert("RGB")
         width, height = image.size
-        scale = POLISH_IMAGE_MAX_SIDE / max(width, height)
+        scale = max_side / max(width, height)
         if scale < 1:
             image = image.resize(
                 (max(1, round(width * scale)), max(1, round(height * scale))), Image.LANCZOS
@@ -309,6 +329,26 @@ def _polish_image_data_url(path: Path) -> str:
         image.save(buffer, format="JPEG", quality=85, optimize=True)
         encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
     return f"data:image/jpeg;base64,{encoded}"
+
+
+def _downscale_image(path: Path, max_side: int) -> Path:
+    """若图片最长边超过 max_side，等比压缩到 max_side 并返回临时文件路径；否则返回原路径。"""
+    try:
+        from PIL import Image
+
+        with Image.open(path) as image:
+            width, height = image.size
+            if max(width, height) <= max_side:
+                return path
+            scale = max_side / max(width, height)
+            new_size = (max(1, round(width * scale)), max(1, round(height * scale)))
+            image = image.convert("RGB").resize(new_size, Image.LANCZOS)
+            handle, tmp_name = tempfile.mkstemp(prefix="h3_downscale_", suffix=".jpg")
+            os.close(handle)
+            image.save(tmp_name, format="JPEG", quality=90)
+            return Path(tmp_name)
+    except Exception:
+        return path
 
 
 def _clean_polished_output(raw: str) -> str:
@@ -404,7 +444,7 @@ def polish_prompt(prompt: str, mode: str, duration: float, images: list[Path], n
         }
     ]
     for path in images:
-        content.append({"type": "image_url", "image_url": {"url": _polish_image_data_url(path)}})
+        content.append({"type": "image_url", "image_url": {"url": _polish_image_data_url(path, len(images))}})
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system},
         {"role": "user", "content": content},
@@ -541,12 +581,13 @@ def polish_reference_prompt(
         audio_index += 1
         inventory.append(f"<Audio {audio_index}>: standalone reference audio; {_media_summary(path)}")
 
+    total_visuals = len(images) + len(videos) * 3
     content: list[dict[str, Any]] = [{"type": "text", "text": "\n".join(inventory)}]
     for index, path in enumerate(images, start=1):
         content.extend(
             [
                 {"type": "text", "text": f"Visual content of <Picture {index}>:"},
-                {"type": "image_url", "image_url": {"url": _polish_image_data_url(path)}},
+                {"type": "image_url", "image_url": {"url": _polish_image_data_url(path, total_visuals)}},
             ]
         )
     with tempfile.TemporaryDirectory(prefix="video_ref_polish_") as temp_name:
@@ -559,7 +600,7 @@ def polish_reference_prompt(
                             "type": "text",
                             "text": f"Representative frame {frame_index} from <Video {index}> (not a Picture label):",
                         },
-                        {"type": "image_url", "image_url": {"url": _polish_image_data_url(frame)}},
+                        {"type": "image_url", "image_url": {"url": _polish_image_data_url(frame, total_visuals)}},
                     ]
                 )
         audio_sources = [*videos, *audios] if use_video_audio else audios
@@ -572,7 +613,7 @@ def polish_reference_prompt(
                             "type": "text",
                             "text": f"Spectrogram of <Audio {index}> (use only as rhythm/energy evidence):",
                         },
-                        {"type": "image_url", "image_url": {"url": _data_url(spectrum)}},
+                        {"type": "image_url", "image_url": {"url": _polish_image_data_url(spectrum, total_visuals)}},
                     ]
                 )
 
@@ -807,7 +848,14 @@ async def _run_generation(task_id: str) -> None:
         if data["mode"] == "reference_to_video":
             workflow["136"]["inputs"]["ref_image_size"] = data.get("ref_image_size", "match")
             for item in data.get("_reference_assets", []):
-                remote_name = await asyncio.to_thread(client.upload_file, Path(item["path"]))
+                source = Path(item["path"])
+                if item["kind"] == "image":
+                    source = _downscale_image(source, H3_IMAGE_MAX_SIDE)
+                try:
+                    remote_name = await asyncio.to_thread(client.upload_file, source)
+                finally:
+                    if source != Path(item["path"]):
+                        source.unlink(missing_ok=True)
                 index = int(item["index"]) - 1
                 kind = item["kind"]
                 if kind == "image":
@@ -830,10 +878,20 @@ async def _run_generation(task_id: str) -> None:
                     workflow[node_id] = {"class_type": "LoadAudio", "inputs": {"audio": remote_name}}
                     workflow["136"]["inputs"][f"ref_audios.ref_audio_{index}"] = [node_id, 0]
         elif "first_frame" in data["_assets"]:
-            first_name = await asyncio.to_thread(client.upload_image, Path(data["_assets"]["first_frame"]))
+            first_source = _downscale_image(Path(data["_assets"]["first_frame"]), H3_IMAGE_MAX_SIDE)
+            try:
+                first_name = await asyncio.to_thread(client.upload_image, first_source)
+            finally:
+                if first_source != Path(data["_assets"]["first_frame"]):
+                    first_source.unlink(missing_ok=True)
             workflow["1"]["inputs"]["image"] = first_name
         if data["mode"] != "reference_to_video" and "last_frame" in data["_assets"]:
-            last_name = await asyncio.to_thread(client.upload_image, Path(data["_assets"]["last_frame"]))
+            last_source = _downscale_image(Path(data["_assets"]["last_frame"]), H3_IMAGE_MAX_SIDE)
+            try:
+                last_name = await asyncio.to_thread(client.upload_image, last_source)
+            finally:
+                if last_source != Path(data["_assets"]["last_frame"]):
+                    last_source.unlink(missing_ok=True)
             workflow["2"]["inputs"]["image"] = last_name
 
         ws_url = client.base_url.replace("http://", "ws://").replace("https://", "wss://")

@@ -80,7 +80,7 @@ def test_workflow_model_filenames_are_configurable(monkeypatch):
 
 
 def test_nsfw_lora_applies_only_to_fl2v_workflow(monkeypatch):
-    monkeypatch.setattr(video_generation, "COMFYUI_NSFW_LORA_NAME", "PinkFluffyBunny-alpha-lora.safetensors")
+    monkeypatch.setattr(video_generation, "COMFYUI_NSFW_LORA_NAME", "SexyGod-NaughtyTimes-v2-rank512.safetensors")
     # 0 档（关闭）：不插入 Lora 节点，模型保持 6 → 150 直连。
     plain = _workflow("text_to_video", "prompt", 608, 352, 5, 1, nsfw_strength=0.0)
     assert "151" not in plain
@@ -92,7 +92,7 @@ def test_nsfw_lora_applies_only_to_fl2v_workflow(monkeypatch):
     workflow = _workflow("text_to_video", "prompt", 608, 352, 5, 1, nsfw_strength=0.3)
     lora = workflow["151"]
     assert lora["class_type"] == "LoraLoader"
-    assert lora["inputs"]["lora_name"] == "PinkFluffyBunny-alpha-lora.safetensors"
+    assert lora["inputs"]["lora_name"] == "SexyGod-NaughtyTimes-v2-rank512.safetensors"
     assert lora["inputs"]["model"] == ["6", 0]
     assert lora["inputs"]["clip"] == ["13", 0]
     assert lora["inputs"]["strength_model"] == 0.3

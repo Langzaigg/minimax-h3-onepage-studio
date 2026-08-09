@@ -100,7 +100,7 @@ COMFYUI_AUDIO_VAE = _setting(
     "minimax_h3_audio_vae_fp32.safetensors",
 )
 # NSFW 风格 Lora：仅应用于 fl2v 工作流（video_api.json），由 nsfw_strength
-# 参数（三档强度，见 nsfw_lora_levels）控制加载强度；多模态参考工作流不加载。
+# 参数（五档强度，见 nsfw_lora_levels）控制加载强度；多模态参考工作流不加载。
 # nsfw_lora_name 留空表示未配置，NSFW 风格 Lora 功能整体禁用（前端不渲染选项）。
 COMFYUI_NSFW_LORA_NAME = _setting(
     "comfyui.lora.nsfw_lora_name",
@@ -110,7 +110,7 @@ COMFYUI_NSFW_LORA_NAME = _setting(
 COMFYUI_NSFW_LORA_ENABLED = bool(COMFYUI_NSFW_LORA_NAME)
 COMFYUI_NSFW_LORA_LEVELS: list[float] = [
     float(part)
-    for part in _setting("comfyui.lora.nsfw_lora_levels", "COMFYUI_NSFW_LORA_LEVELS", "0,0.3,0.5").split(",")
+    for part in _setting("comfyui.lora.nsfw_lora_levels", "COMFYUI_NSFW_LORA_LEVELS", "0,0.3,0.5,0.7,1.0").split(",")
     if part.strip()
 ]
 

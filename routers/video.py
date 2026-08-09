@@ -126,7 +126,7 @@ def validate_reference_counts(images: int, videos: int, audios: int) -> None:
 
 
 def validate_nsfw_strength(value: float) -> float:
-    """NSFW Lora 强度仅允许配置的三档（默认 0 / 0.3 / 0.5）。
+    """NSFW Lora 强度仅允许配置的档位（默认 0 / 0.3 / 0.5 / 0.7 / 1.0）。
 
     该参数在 fl2v 工作流中生效；多模态参考生成接口同样接收并记录，
     但不影响参考工作流（与前端“选项不禁用但不生效”的行为一致）。
@@ -159,7 +159,7 @@ async def prompt_polish(
     prompt: Annotated[str, Form(min_length=1)],
     duration: Annotated[float, Form(ge=VIDEO_MIN_DURATION, le=VIDEO_MAX_DURATION)] = VIDEO_DEFAULT_DURATION,
     nsfw_strength: Annotated[
-        float, Form(description="NSFW 风格 Lora 强度，仅支持 0 / 0.3 / 0.5；>0 时润色注入 NSFW 风格指南")
+        float, Form(description="NSFW 风格 Lora 强度，仅支持 0 / 0.3 / 0.5 / 0.7 / 1.0；>0 时润色注入 NSFW 风格指南")
     ] = 0.0,
     first_frame: UploadFile | None = File(None),
     last_frame: UploadFile | None = File(None),
@@ -190,7 +190,7 @@ async def reference_prompt_polish(
     prompt: Annotated[str, Form(min_length=1)],
     duration: Annotated[float, Form(ge=VIDEO_MIN_DURATION, le=VIDEO_MAX_DURATION)] = VIDEO_DEFAULT_DURATION,
     nsfw_strength: Annotated[
-        float, Form(description="NSFW 风格 Lora 强度，仅支持 0 / 0.3 / 0.5；参考模式不加载 lora，但 >0 时润色仍注入 NSFW 风格指南")
+        float, Form(description="NSFW 风格 Lora 强度，仅支持 0 / 0.3 / 0.5 / 0.7 / 1.0；参考模式不加载 lora，但 >0 时润色仍注入 NSFW 风格指南")
     ] = 0.0,
     use_video_audio: Annotated[bool, Form()] = True,
     reference_images: list[UploadFile] = File(default=[]),
@@ -402,7 +402,7 @@ async def create_video_task(
         bool, Form(description="默认 false 直接生成；true 时先用配置的视觉模型润色，再自动生成")
     ] = False,
     nsfw_strength: Annotated[
-        float, Form(description="NSFW 风格 Lora 强度，仅支持 0 / 0.3 / 0.5 三档，仅在 fl2v 工作流生效")
+        float, Form(description="NSFW 风格 Lora 强度，仅支持 0 / 0.3 / 0.5 / 0.7 / 1.0 五档，仅在 fl2v 工作流生效")
     ] = 0.0,
     first_frame: UploadFile | None = File(None),
     last_frame: UploadFile | None = File(None),
@@ -436,7 +436,7 @@ async def create_reference_video_task(
         bool, Form(description="默认 false 直接生成；true 时先生成六段式参考提示词，再自动生成")
     ] = False,
     nsfw_strength: Annotated[
-        float, Form(description="NSFW 风格 Lora 强度，仅支持 0 / 0.3 / 0.5 三档；参考模式仅记录不生效")
+        float, Form(description="NSFW 风格 Lora 强度，仅支持 0 / 0.3 / 0.5 / 0.7 / 1.0 五档；参考模式仅记录不生效")
     ] = 0.0,
     ref_image_size: Annotated[str, Form()] = "match",
     use_video_audio: Annotated[bool, Form()] = True,

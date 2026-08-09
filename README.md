@@ -256,12 +256,12 @@ Spectrum 通过对隐藏特征做 Chebyshev 岭回归预测来跳过部分 trans
 
 ## NSFW 风格 Lora
 
-`comfyui.lora.nsfw_lora_name`（默认 `PinkFluffyBunny-alpha-lora.safetensors`）指定的 Lora 通过任务参数 `nsfw_strength` 控制强度，仅支持配置的三档（默认 `0 / 0.3 / 0.5`）：
+`comfyui.lora.nsfw_lora_name`（默认 `SexyGod-NaughtyTimes-v2-rank512.safetensors`）指定的 Lora 通过任务参数 `nsfw_strength` 控制强度，仅支持配置的五档（默认 `0 / 0.3 / 0.5 / 0.7 / 1.0`）：
 
 | `nsfw_strength` | 行为 |
 |---|---|
 | `0`（默认） | 工作流完全不含 Lora 节点，不加载 Lora 文件 |
-| `0.3` / `0.5` | fl2v 工作流在 UNETLoader 与 Spectrum/调度器之间插入 `LoraLoader` 节点，model 与 clip 均应用该强度 |
+| `0.3` / `0.5` / `0.7` / `1.0` | fl2v 工作流在 UNETLoader 与 Spectrum/调度器之间插入 `LoraLoader` 节点，model 与 clip 均应用该强度 |
 
 约束：
 
@@ -303,7 +303,7 @@ curl -X POST http://127.0.0.1:7788/api/video/tasks \
   -F "first_frame=@first.png"
 ```
 
-`nsfw_strength` 可选，仅支持 `0 / 0.3 / 0.5` 三档，默认 `0`；仅在 fl2v 工作流生效（详见上文「NSFW 风格 Lora」）。
+`nsfw_strength` 可选，仅支持 `0 / 0.3 / 0.5 / 0.7 / 1.0` 五档，默认 `0`；仅在 fl2v 工作流生效（详见上文「NSFW 风格 Lora」）。
 
 ### 创建多模态参考任务
 

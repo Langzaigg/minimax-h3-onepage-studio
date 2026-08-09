@@ -9,7 +9,7 @@
   "125": {"class_type": "SamplerCustomAdvanced", "inputs": {"noise": ["129", 0], "guider": ["126", 0], "sampler": ["123", 0], "sigmas": ["124", 0], "latent_image": ["136", 1]}},
   "126": {"class_type": "BasicGuider", "inputs": {"model": ["150", 0], "conditioning": ["136", 0]}},
   "127": {"class_type": "UNETLoader", "inputs": {"unet_name": "minimax_h3_ref2va_pruned_int8_convrot.safetensors", "weight_dtype": "default"}},
-  "150": {"class_type": "SpectrumApplyMiniMaxH3", "inputs": {"enabled": true, "blend_weight": 0.5, "degree": 4, "ridge_lambda": 0.1, "window_size": 2, "flex_window": 0.75, "warmup_steps": 5, "tail_actual_steps": 1, "max_history": 8, "debug": false, "history_storage": "system_ram", "model": ["127", 0]}},
+  "150": {"class_type": "SpectrumApplyMiniMaxH3", "inputs": {"enabled": true, "blend_weight": 0.5, "degree": 2, "ridge_lambda": 0.1, "window_size": 2, "flex_window": 0.75, "warmup_steps": 3, "tail_actual_steps": 1, "max_history": 8, "debug": false, "history_storage": "system_ram", "bootstrap_first_forecast": false, "anchor_residual_feedback": false, "selective_rollback_correction": false, "offline_smoothing_replay": true, "audio_blend_weight": 0, "model": ["127", 0]}},
   "128": {"class_type": "CLIPLoader", "inputs": {"clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors", "type": "minimax", "device": "default"}},
   "129": {"class_type": "RandomNoise", "inputs": {"noise_seed": 1}},
   "130": {"class_type": "CreateVideo", "inputs": {"fps": 24, "bit_depth": 8, "images": ["122", 0], "audio": ["121", 0]}},
