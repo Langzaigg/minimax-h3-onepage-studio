@@ -1,11 +1,18 @@
 import json
 import asyncio
+import re
+import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import main
 import pytest
 from fastapi import HTTPException
+from config import (
+    COMFYUI_TURBO_FL2V_4STEP_LORA,
+    COMFYUI_TURBO_FL2V_8STEP_LORA,
+    COMFYUI_TURBO_REF2V_4STEP_LORA,
+)
 from routers.video import _create_video_task_impl, derive_mode, dimensions, resolve_aspect_ratio
 from services import storage_maintenance
 from services import video_generation
@@ -79,45 +86,304 @@ def test_workflow_model_filenames_are_configurable(monkeypatch):
     assert reference["120"]["inputs"]["vae_name"] == "custom_audio_vae.safetensors"
 
 
-def test_nsfw_lora_applies_only_to_fl2v_workflow(monkeypatch):
-    monkeypatch.setattr(video_generation, "COMFYUI_NSFW_LORA_NAME", "SexyGod-NaughtyTimes-v2-rank512.safetensors")
-    # 0 档（关闭）：不插入 Lora 节点，模型保持 6 → 150 直连。
-    plain = _workflow("text_to_video", "prompt", 608, 352, 5, 1, nsfw_strength=0.0)
-    assert "151" not in plain
+FL2V_AIO_LORA = "HMNSFW-AIO-V2.5.safetensors"
+FL2V_VAGINA_LORA = "Vagina_minimax-h3_epoch20.safetensors"
+REF2V_NSFW_LORA = "AfterMidnight_ref2va_h3_sexytime_rank64-v1.2.safetensors"
+# NSFW 档位示例：fl2v 两档（单 LoRA / 叠加双 LoRA），ref2v 一档。
+SAMPLE_NSFW_PRESETS = {
+    "fl2v": [
+        {"id": "aio", "label": "AIO 1.0", "loras": [{"name": FL2V_AIO_LORA, "strength": 1.0}]},
+        {
+            "id": "aio-vagina",
+            "label": "AIO 0.65 + Vagina 0.35",
+            "loras": [
+                {"name": FL2V_AIO_LORA, "strength": 0.65},
+                {"name": FL2V_VAGINA_LORA, "strength": 0.35},
+            ],
+        },
+    ],
+    "ref2v": [
+        {
+            "id": "aftermidnight",
+            "label": "AfterMidnight 1.0",
+            "loras": [{"name": REF2V_NSFW_LORA, "strength": 1.0}],
+        }
+    ],
+}
+
+
+def _use_nsfw_presets(monkeypatch, presets=None) -> dict:
+    presets = SAMPLE_NSFW_PRESETS if presets is None else presets
+    monkeypatch.setattr(video_generation, "NSFW_PRESETS", presets)
+    return presets
+
+
+def _nsfw_preset(mode: str, preset_id: str | None = None):
+    return video_generation.resolve_nsfw_preset(preset_id, mode)
+
+
+def test_nsfw_preset_stacks_multiple_loras_on_fl2v(monkeypatch):
+    _use_nsfw_presets(monkeypatch)
+    preset = _nsfw_preset("text_to_video", "aio-vagina")
+    workflow = _workflow("text_to_video", "prompt", 608, 352, 5, 1, nsfw=True, nsfw_preset=preset)
+    # 基模不变，两个 LoRA 按顺序串联：UNET(6) → 151 → 152 → Spectrum(150)。
+    assert workflow["6"]["inputs"]["unet_name"] == video_generation.COMFYUI_FL2VA_MODEL
+    assert workflow["151"]["inputs"] == {
+        "lora_name": FL2V_AIO_LORA, "strength_model": 0.65, "model": ["6", 0]
+    }
+    assert workflow["152"]["inputs"] == {
+        "lora_name": FL2V_VAGINA_LORA, "strength_model": 0.35, "model": ["151", 0]
+    }
+    assert workflow["150"]["inputs"]["model"] == ["152", 0]
+    assert workflow["9"]["inputs"]["model"] == ["150", 0]
+    assert workflow["16"]["inputs"]["model"] == ["150", 0]
+
+    # 单 LoRA 档位只挂一个节点。
+    single = _workflow(
+        "text_to_video", "prompt", 608, 352, 5, 1, nsfw=True,
+        nsfw_preset=_nsfw_preset("text_to_video", "aio"),
+    )
+    assert single["151"]["inputs"]["strength_model"] == 1.0
+    assert "152" not in single
+
+    # 关闭：不注入任何 LoRA，基模直连 Spectrum。
+    plain = _workflow("text_to_video", "prompt", 608, 352, 5, 1, nsfw=False)
+    assert "151" not in plain and "152" not in plain
     assert plain["150"]["inputs"]["model"] == ["6", 0]
-    assert plain["104"]["inputs"]["clip"] == ["13", 0]
-
-    # 0.3 档：fl2v 工作流插入 LoraLoader，串在 UNETLoader(6) 与 Spectrum(150) 之间，
-    # clip 改为 Lora 输出（13 → 151 → 104）。
-    workflow = _workflow("text_to_video", "prompt", 608, 352, 5, 1, nsfw_strength=0.3)
-    lora = workflow["151"]
-    assert lora["class_type"] == "LoraLoader"
-    assert lora["inputs"]["lora_name"] == "SexyGod-NaughtyTimes-v2-rank512.safetensors"
-    assert lora["inputs"]["model"] == ["6", 0]
-    assert lora["inputs"]["clip"] == ["13", 0]
-    assert lora["inputs"]["strength_model"] == 0.3
-    assert lora["inputs"]["strength_clip"] == 0.3
-    assert workflow["150"]["inputs"]["model"] == ["151", 0]
-    assert workflow["104"]["inputs"]["clip"] == ["151", 1]
-
-    # 0.5 档：强度随参数变化。
-    strong = _workflow("first_last_frame", "prompt", 608, 352, 5, 1, nsfw_strength=0.5)
-    assert strong["151"]["inputs"]["strength_model"] == 0.5
-    assert strong["151"]["inputs"]["strength_clip"] == 0.5
-
-    # 参考生成模式：即使传入强度也不插入 Lora 节点（选项保留但不生效）。
-    reference = _workflow("reference_to_video", "prompt", 608, 352, 5, 1, nsfw_strength=0.5)
-    assert "151" not in reference
-    assert reference["150"]["inputs"]["model"] == ["127", 0]
 
 
-def test_nsfw_lora_wiring_without_spectrum(monkeypatch):
+def test_nsfw_preset_wiring_without_spectrum(monkeypatch):
+    _use_nsfw_presets(monkeypatch)
     monkeypatch.setattr(video_generation, "COMFYUI_SPECTRUM_ENABLED", False)
-    workflow = _workflow("text_to_video", "prompt", 608, 352, 5, 1, nsfw_strength=0.3)
+    workflow = _workflow(
+        "text_to_video", "prompt", 608, 352, 5, 1, nsfw=True,
+        nsfw_preset=_nsfw_preset("text_to_video", "aio-vagina"),
+    )
     assert "150" not in workflow
-    assert workflow["9"]["inputs"]["model"] == ["151", 0]
-    assert workflow["16"]["inputs"]["model"] == ["151", 0]
-    assert workflow["104"]["inputs"]["clip"] == ["151", 1]
+    assert workflow["9"]["inputs"]["model"] == ["152", 0]
+    assert workflow["16"]["inputs"]["model"] == ["152", 0]
+
+
+def test_reference_nsfw_preset_uses_own_family(monkeypatch):
+    _use_nsfw_presets(monkeypatch)
+    preset = _nsfw_preset("reference_to_video", "aftermidnight")
+    workflow = _workflow(
+        "reference_to_video", "prompt", 608, 352, 5, 1, nsfw=True, nsfw_preset=preset
+    )
+    assert workflow["127"]["inputs"]["unet_name"] == video_generation.COMFYUI_REF2VA_MODEL
+    assert workflow["144"]["inputs"]["lora_name"] == REF2V_NSFW_LORA
+    assert workflow["144"]["inputs"]["model"] == ["127", 0]
+    assert workflow["150"]["inputs"]["model"] == ["144", 0]
+    # fl2v 档位不会串到 ref2v 工作流上。
+    assert "151" not in workflow
+
+
+def test_nsfw_and_turbo_are_mutually_exclusive(monkeypatch):
+    _use_nsfw_presets(monkeypatch)
+    for mode, turbo_id, preset_id in (
+        ("text_to_video", "turbo-0.5-6", "aio"),
+        ("reference_to_video", "turbo-0.5-8", "aftermidnight"),
+    ):
+        turbo = video_generation.resolve_turbo_preset(turbo_id, mode)
+        assert turbo is not None
+        # 工作流层兜底：turbo + NSFW 档位直接报错，避免蒸馏 lora 与 NSFW lora 叠加。
+        with pytest.raises(ValueError):
+            _workflow(
+                mode, "prompt", 960, 544, 5, 1, nsfw=True, turbo=turbo,
+                nsfw_preset=_nsfw_preset(mode, preset_id),
+            )
+
+    from routers.video import validate_nsfw_turbo_conflict
+
+    turbo = video_generation.resolve_turbo_preset("turbo-0.5-6", "text_to_video")
+    with pytest.raises(HTTPException):
+        validate_nsfw_turbo_conflict(_nsfw_preset("text_to_video", "aio"), turbo)
+    validate_nsfw_turbo_conflict(None, turbo)
+    validate_nsfw_turbo_conflict(_nsfw_preset("text_to_video", "aio"), None)
+
+
+def test_resolve_nsfw_rejects_unknown_or_missing_presets(monkeypatch):
+    from routers.video import resolve_nsfw
+
+    monkeypatch.setattr(video_generation, "COMFYUI_NSFW_NATIVE_ENABLED", False)
+    monkeypatch.setattr(video_generation, "COMFYUI_NSFW_NATIVE_MODEL", "")
+    _use_nsfw_presets(monkeypatch)
+    # 关闭 → None；未指定档位 → 回落第一个档位。
+    assert resolve_nsfw(False, "", "text_to_video") is None
+    assert resolve_nsfw(True, "", "text_to_video")["id"] == "aio"
+    assert resolve_nsfw(True, "aio-vagina", "text_to_video")["id"] == "aio-vagina"
+    # 未知档位 / 未配置档位 → 400。
+    with pytest.raises(HTTPException):
+        resolve_nsfw(True, "nope", "text_to_video")
+    monkeypatch.setattr(video_generation, "NSFW_PRESETS", {"fl2v": [], "ref2v": []})
+    with pytest.raises(HTTPException):
+        resolve_nsfw(True, "", "text_to_video")
+    with pytest.raises(HTTPException):
+        resolve_nsfw(True, "", "reference_to_video")
+
+
+def test_nsfw_native_preset_swaps_fl2v_base_model(monkeypatch):
+    native_model = "PinkCherry_MiniMax_H3_pruned_int8_convrot-beta-0.6.safetensors"
+    monkeypatch.setattr(video_generation, "COMFYUI_NSFW_NATIVE_MODEL", native_model)
+    monkeypatch.setattr(video_generation, "COMFYUI_NSFW_NATIVE_ENABLED", True)
+    _use_nsfw_presets(monkeypatch)
+
+    # 原生基模档位：替换 UNETLoader 6 基模，不挂任何 LoRA 节点。
+    preset = video_generation.resolve_nsfw_preset("native", "text_to_video")
+    assert preset["native"] is True and preset["loras"] == []
+    workflow = _workflow("text_to_video", "prompt", 608, 352, 5, 1, nsfw=True, nsfw_preset=preset)
+    assert workflow["6"]["inputs"]["unet_name"] == native_model
+    assert "151" not in workflow
+    assert workflow["150"]["inputs"]["model"] == ["6", 0]
+
+    # 原生基模不挂 LoRA，可与 turbo 组合（蒸馏 lora 直接作用于原生基模）。
+    turbo = video_generation.resolve_turbo_preset("turbo-0.5-6", "text_to_video")
+    native_turbo = _workflow(
+        "text_to_video", "prompt", 960, 544, 5, 1, nsfw=True, turbo=turbo, nsfw_preset=preset
+    )
+    assert native_turbo["6"]["inputs"]["unet_name"] == native_model
+    assert native_turbo["122"]["inputs"]["lora_name"] == COMFYUI_TURBO_FL2V_8STEP_LORA
+
+    # LoRA 档位保持常规基模（互斥的另一侧）。
+    lora_workflow = _workflow(
+        "text_to_video", "prompt", 608, 352, 5, 1, nsfw=True,
+        nsfw_preset=video_generation.resolve_nsfw_preset("aio", "text_to_video"),
+    )
+    assert lora_workflow["6"]["inputs"]["unet_name"] == video_generation.COMFYUI_FL2VA_MODEL
+    assert "151" in lora_workflow
+
+    # ref2v 不支持原生基模档位。
+    assert video_generation.resolve_nsfw_preset("native", "reference_to_video") is None
+
+
+def test_nsfw_native_and_lora_cannot_be_combined(monkeypatch):
+    monkeypatch.setattr(video_generation, "COMFYUI_NSFW_NATIVE_MODEL", "native.safetensors")
+    monkeypatch.setattr(video_generation, "COMFYUI_NSFW_NATIVE_ENABLED", True)
+    _use_nsfw_presets(monkeypatch)
+    malformed = {"id": "native", "native": True, "loras": [{"name": FL2V_AIO_LORA, "strength": 1.0}]}
+    with pytest.raises(ValueError):
+        _workflow("text_to_video", "prompt", 608, 352, 5, 1, nsfw=True, nsfw_preset=malformed)
+
+
+def test_resolve_nsfw_native_only_when_configured(monkeypatch):
+    from routers.video import resolve_nsfw
+
+    _use_nsfw_presets(monkeypatch)
+    monkeypatch.setattr(video_generation, "COMFYUI_NSFW_NATIVE_ENABLED", False)
+    monkeypatch.setattr(video_generation, "COMFYUI_NSFW_NATIVE_MODEL", "")
+    # 未配置原生基模：native 档位不可用（400）。
+    with pytest.raises(HTTPException):
+        resolve_nsfw(True, "native", "text_to_video")
+    monkeypatch.setattr(video_generation, "COMFYUI_NSFW_NATIVE_ENABLED", True)
+    monkeypatch.setattr(video_generation, "COMFYUI_NSFW_NATIVE_MODEL", "native.safetensors")
+    assert resolve_nsfw(True, "native", "text_to_video")["native"] is True
+    # ref2v 永远没有 native 档位。
+    with pytest.raises(HTTPException):
+        resolve_nsfw(True, "native", "reference_to_video")
+
+
+def test_frontend_config_exposes_nsfw_presets(monkeypatch):
+    monkeypatch.setattr(main, "NSFW_PRESETS", SAMPLE_NSFW_PRESETS)
+    monkeypatch.setattr(main, "COMFYUI_NSFW_NATIVE_ENABLED", False)
+    config = asyncio.run(main.frontend_config())
+    assert config["nsfw_presets"]["fl2v"] == [
+        {"id": "aio", "label": "AIO 1.0"},
+        {"id": "aio-vagina", "label": "AIO 0.65 + Vagina 0.35"},
+    ]
+    assert config["nsfw_presets"]["ref2v"] == [{"id": "aftermidnight", "label": "AfterMidnight 1.0"}]
+    # 配置了原生基模时，fl2v 末尾追加 native 档位（ref2v 不追加）。
+    monkeypatch.setattr(main, "COMFYUI_NSFW_NATIVE_ENABLED", True)
+    with_native = asyncio.run(main.frontend_config())["nsfw_presets"]
+    assert with_native["fl2v"][-1] == {"id": "native", "label": "原生基模", "native": True}
+    assert all(item.get("id") != "native" for item in with_native["ref2v"])
+
+
+def test_turbo_presets_and_resolution_resolution():
+    from routers.video import resolve_resolution
+
+    # fl2v：0.5（6step）/0.5（8step）用 8step lora，1.0（4step）用 4step 768p lora。
+    assert video_generation.turbo_preset_ids("text_to_video") == [
+        "turbo-0.5-6", "turbo-0.5-8", "turbo-1.0-4",
+    ]
+    # ref2v：0.5 的 4/6/8 step 三档共用同一个 4step lora。
+    assert video_generation.turbo_preset_ids("reference_to_video") == [
+        "turbo-0.5-4", "turbo-0.5-6", "turbo-0.5-8",
+    ]
+
+    megapixels, preset, turbo = resolve_resolution("turbo-0.5-6", 0.4, "text_to_video")
+    assert (megapixels, preset) == (0.5, "turbo-0.5-6")
+    assert turbo["steps"] == 6
+    assert turbo["lora"] == COMFYUI_TURBO_FL2V_8STEP_LORA
+    assert turbo["shift_video"] == 12.0 and turbo["shift_audio"] == 3.0
+
+    megapixels4, preset4, turbo4 = resolve_resolution("turbo-1.0-4", 0.4, "text_to_video")
+    assert (megapixels4, preset4) == (1.0, "turbo-1.0-4")
+    assert turbo4["steps"] == 4
+    assert turbo4["lora"] == COMFYUI_TURBO_FL2V_4STEP_LORA
+    assert turbo4["shift_video"] == 6.0 and turbo4["shift_audio"] == 3.0
+
+    for steps in (4, 6, 8):
+        _, preset_ref, turbo_ref = resolve_resolution(
+            f"turbo-0.5-{steps}", 0.4, "reference_to_video"
+        )
+        assert preset_ref == f"turbo-0.5-{steps}"
+        assert turbo_ref["steps"] == steps
+        assert turbo_ref["lora"] == COMFYUI_TURBO_REF2V_4STEP_LORA
+
+    # 空档位 → 普通工作流。
+    assert resolve_resolution("", 0.4, "text_to_video") == (0.4, None, None)
+    # ref2v 不支持 fl2v 专属 turbo 档（turbo-1.0-4），fl2v 不支持 turbo-0.5-4。
+    with pytest.raises(HTTPException):
+        resolve_resolution("turbo-1.0-4", 0.4, "reference_to_video")
+    with pytest.raises(HTTPException):
+        resolve_resolution("turbo-0.5-4", 0.4, "text_to_video")
+    with pytest.raises(HTTPException):
+        resolve_resolution("turbo-9.9-9", 0.4, "text_to_video")
+
+
+def test_turbo_fl2v_workflow_direct_steps_without_skipping(monkeypatch):
+    turbo = video_generation.resolve_turbo_preset("turbo-0.5-6", "text_to_video")
+    workflow = _workflow("text_to_video", "prompt", 960, 544, 5, 1, turbo=turbo)
+    # 步数直接写入 BasicScheduler，SigmaShift 按步数重建网格；无跳步参数、无 Spectrum。
+    assert workflow["9"]["inputs"]["steps"] == 6
+    assert workflow["9"]["inputs"]["model"] == ["123", 0]
+    assert workflow["123"]["inputs"]["shift_video"] == 12.0
+    assert workflow["123"]["inputs"]["shift_audio"] == 3.0
+    assert workflow["123"]["inputs"]["model"] == ["122", 0]
+    assert workflow["122"]["inputs"]["lora_name"] == COMFYUI_TURBO_FL2V_8STEP_LORA
+    assert workflow["122"]["inputs"]["model"] == ["6", 0]
+    assert workflow["16"]["inputs"]["model"] == ["123", 0]
+    assert workflow["17"]["inputs"]["sampler_name"] == "euler"
+    assert "150" not in workflow and "151" not in workflow
+    assert "first_frame" not in workflow["104"]["inputs"]
+    # 首尾帧分支照常裁剪/保留。
+    first_only = _workflow("first_frame", "prompt", 960, 544, 5, 1, turbo=turbo)
+    assert "first_frame" in first_only["104"]["inputs"]
+    assert "last_frame" not in first_only["104"]["inputs"]
+    # NSFW 与 turbo 互斥：turbo 工作流不换基模、也不挂任何 NSFW lora。
+    _use_nsfw_presets(monkeypatch)
+    with pytest.raises(ValueError):
+        _workflow(
+            "text_to_video", "prompt", 960, 544, 5, 1, nsfw=True, turbo=turbo,
+            nsfw_preset=video_generation.resolve_nsfw_preset("aio", "text_to_video"),
+        )
+
+
+def test_turbo_reference_workflow_shares_single_lora():
+    for steps in (4, 6, 8):
+        turbo = video_generation.resolve_turbo_preset(
+            f"turbo-0.5-{steps}", "reference_to_video"
+        )
+        workflow = _workflow("reference_to_video", "prompt", 960, 544, 5, 1, turbo=turbo)
+        assert workflow["124"]["inputs"]["steps"] == steps
+        assert workflow["143"]["inputs"]["lora_name"] == COMFYUI_TURBO_REF2V_4STEP_LORA
+        assert workflow["142"]["inputs"]["shift_video"] == 12.0
+        assert workflow["126"]["inputs"]["model"] == ["142", 0]
+        assert "150" not in workflow and "151" not in workflow
+    # 普通 ref2v 工作流保持 res_multistep + Spectrum 结构。
+    plain = _workflow("reference_to_video", "prompt", 960, 544, 5, 1)
+    assert plain["123"]["inputs"]["sampler_name"] == "res_multistep"
+    assert "143" not in plain
 
 
 def test_public_task_hides_generation_backend_identifiers():
@@ -241,7 +507,7 @@ def test_same_generation_implementation_switches_direct_or_polish_first(tmp_path
     )
     for auto_polish in (False, True):
         asyncio.run(_create_video_task_impl(
-            "a calm lake", 5, 0.2, "16:9", 7, None, None, auto_polish
+            "a calm lake", 5, 0.2, "", "16:9", 7, None, None, auto_polish
         ))
     assert [kind for _, kind in started] == ["direct", "polish"]
 
@@ -254,3 +520,93 @@ def test_emergency_cleanup_candidates_never_include_active_video_tasks(tmp_path,
     paths = {path for _, path in storage_maintenance._emergency_candidates()}
     assert video_root / ("5" * 32) in paths
     assert video_root / ("6" * 32) not in paths
+
+
+def _make_test_video(ffmpeg: str, folder: Path, size: str = "640x360") -> Path:
+    output = folder / "sample.mp4"
+    subprocess.run(
+        [
+            ffmpeg, "-y", "-f", "lavfi", "-i", f"testsrc=duration=2:size={size}:rate=24",
+            "-pix_fmt", "yuv420p", str(output),
+        ],
+        capture_output=True,
+        check=True,
+        timeout=90,
+    )
+    return output
+
+
+@pytest.mark.skipif(not video_generation.FFMPEG_PATH, reason="未配置 ffmpeg（ffmpeg.path 为空）")
+def test_reference_video_helpers_480p_gif_and_resize(tmp_path):
+    """参考视频转 480p GIF（喂润色模型）与重编码到输出分辨率/帧率（喂生成模型）。"""
+    from PIL import Image
+
+    folder = tmp_path / "work"
+    folder.mkdir()
+    video = _make_test_video(video_generation.FFMPEG_PATH, folder)
+
+    gif = video_generation._video_to_480p_gif(video, folder)
+    assert gif is not None and gif.is_file() and gif.stat().st_size > 0
+    with Image.open(gif) as image:
+        assert max(image.size) <= video_generation.POLISH_GIF_MAX_SIDE
+        assert image.format == "GIF"
+
+    resized = video_generation._resize_reference_video(video, 608, 352, 124 / 5)
+    assert resized is not None and resized.is_file() and resized.stat().st_size > 0
+    try:
+        # 解码一帧验证输出分辨率与目标一致（608x352）。
+        frame = folder / "frame.png"
+        subprocess.run(
+            [video_generation.FFMPEG_PATH, "-y", "-i", str(resized), "-frames:v", "1", str(frame)],
+            capture_output=True,
+            check=True,
+            timeout=60,
+        )
+        with Image.open(frame) as image:
+            assert image.size == (608, 352)
+        # 帧率对齐目标（124 帧 / 5 秒 = 24.8fps）。
+        probe = subprocess.run(
+            [video_generation.FFMPEG_PATH, "-i", str(resized)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+        )
+        match = re.search(r"(\d+(?:\.\d+)?) fps", probe.stderr)
+        assert match and abs(float(match.group(1)) - 124 / 5) < 0.2
+    finally:
+        resized.unlink(missing_ok=True)
+
+
+@pytest.mark.skipif(not video_generation.FFMPEG_PATH, reason="未配置 ffmpeg（ffmpeg.path 为空）")
+def test_polish_reference_prompt_feeds_480p_gif_for_video_reference(tmp_path, monkeypatch):
+    """配置 ffmpeg 时，参考视频转成 480p GIF 作为视频参考信息喂给润色模型（不再用代表帧）。"""
+    video = _make_test_video(video_generation.FFMPEG_PATH, tmp_path)
+    calls = []
+
+    class FakeLLM:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def complete_text(self, messages, options, **kwargs):
+            calls.append(messages)
+            return (
+                "subject_definitions: OK\nsummary: OK\nretention_analysis: OK\n"
+                "detailed_description: OK\noverall_soundscape: OK\nnon_diegetic_music: OK"
+            )
+
+    monkeypatch.setattr(video_generation, "LLMClient", FakeLLM)
+    result = video_generation.polish_reference_prompt(
+        "a quiet lake at dusk", 5, [], [video], [], True, False
+    )
+    assert "non_diegetic_music: OK" in result
+    content = calls[0][1]["content"]
+    gif_parts = [
+        part for part in content
+        if part.get("type") == "image_url"
+        and str(part["image_url"]["url"]).startswith("data:image/gif;base64,")
+    ]
+    assert gif_parts, "参考视频应转成 480p GIF 喂给润色模型"
+    assert "Animated GIF overview of <Video 1>" in json.dumps(content, ensure_ascii=False)
+    assert not any("Representative frame" in str(part.get("text", "")) for part in content)

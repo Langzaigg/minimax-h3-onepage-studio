@@ -11,8 +11,25 @@ def configure_access_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(access_control, "STATS_PATH", tmp_path / "usage_stats.json")
 
 
+def test_admin_mode_allows_direct_access_without_credentials(tmp_path, monkeypatch):
+    """admin 模式（默认）：无需任何凭据即可直接以管理员身份访问，管理控制台同样可用。"""
+    configure_access_paths(tmp_path, monkeypatch)
+    monkeypatch.setattr(access_control, "ACCESS_MODE", "admin")
+    with TestClient(main.app) as client:
+        tasks = client.get("/api/video/tasks")
+        assert tasks.status_code == 200
+        status = client.get("/api/access/status").json()
+        assert status["authenticated"] is True
+        assert status["role"] == "admin"
+        assert client.get("/api/admin/api-keys").status_code == 200
+        assert client.get("/api/video/tasks", headers={"X-API-Key": "anything"}).status_code == 200
+        # 注册接口在 admin 模式下不可用。
+        assert client.post("/api/access/register", json={"username": "someone"}).status_code == 403
+
+
 def test_video_requires_api_key_and_admin_can_manage_full_keys(tmp_path, monkeypatch):
     configure_access_paths(tmp_path, monkeypatch)
+    monkeypatch.setattr(access_control, "ACCESS_MODE", "key")
     with TestClient(main.app) as client:
         assert client.get("/api/video/tasks").status_code == 401
         assert client.post("/api/access/verify", json={"secret": "wrong"}).status_code == 401
@@ -53,6 +70,7 @@ def test_video_requires_api_key_and_admin_can_manage_full_keys(tmp_path, monkeyp
 
 def test_business_usage_is_aggregated_by_week_and_key(tmp_path, monkeypatch):
     configure_access_paths(tmp_path, monkeypatch)
+    monkeypatch.setattr(access_control, "ACCESS_MODE", "key")
     with TestClient(main.app) as admin_client:
         created = admin_client.post(
             "/api/admin/api-keys",

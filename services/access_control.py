@@ -11,7 +11,12 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from config import ACCESS_DATA_FOLDER, ACCESS_SESSION_MAX_AGE_SECONDS, SERVICE_ADMIN_KEY
+from config import (
+    ACCESS_DATA_FOLDER,
+    ACCESS_MODE,
+    ACCESS_SESSION_MAX_AGE_SECONDS,
+    SERVICE_ADMIN_KEY,
+)
 
 
 COOKIE_NAME = "minimax_h3_studio_access_session"
@@ -228,6 +233,9 @@ def extract_header_secret(headers: Any) -> str:
 
 
 def identify_access(headers: Any, cookies: Any, touch: bool = False) -> dict[str, Any] | None:
+    # admin 模式：管理员单用户，无需任何凭据，一律直接以管理员身份访问。
+    if ACCESS_MODE == "admin":
+        return {"role": "admin", "key_id": ADMIN_KEY_ID, "name": "管理员"}
     admin_key = headers.get("x-admin-key", "").strip()
     if is_admin_secret(admin_key):
         return {"role": "admin", "key_id": ADMIN_KEY_ID, "name": "管理员"}

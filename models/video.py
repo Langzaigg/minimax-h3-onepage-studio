@@ -19,6 +19,10 @@ class VideoTaskSummary(BaseModel):
     width: int
     height: int
     resolution_megapixels: float = 0.4
+    resolution_preset: str | None = Field(
+        default=None, description="turbo 分辨率档位 id（如 turbo-0.5-6）；普通档位为空"
+    )
+    turbo_steps: int | None = Field(default=None, description="turbo 蒸馏采样步数（4/6/8）")
     aspect_ratio: str = "16:9"
     seed: int
     progress: float = Field(ge=0, le=100)
@@ -35,7 +39,13 @@ class VideoTaskSummary(BaseModel):
     reference_counts: dict[str, int] = Field(default_factory=dict)
     ref_image_size: str | None = None
     use_video_audio: bool | None = None
+    nsfw: bool | None = None
+    nsfw_preset: str | None = Field(
+        default=None, description="NSFW 档位 id（如 aio / aio-vagina）；未开启为空"
+    )
+    # 历史字段：NSFW 曾用强度/原生开关，现统一为 nsfw 布尔（读取时历史值回落为 true）。
     nsfw_strength: float | None = None
+    nsfw_native: bool | None = None
 
 
 class VideoTaskList(BaseModel):

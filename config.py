@@ -62,8 +62,11 @@ SERVICE_GIT_PULL_TIMEOUT = _setting(
     "server.git_pull_timeout_seconds", "SERVICE_GIT_PULL_TIMEOUT", 120, int
 )
 
-# 访问模式：key = 密钥模式（默认，管理员/API Key）；register = 注册模式（用户名即注册，无密码）。
-ACCESS_MODE = _setting("access.mode", "ACCESS_MODE", "key")
+# 访问模式：
+#   admin（默认）= 管理员单用户模式：无需任何凭据，直接以管理员身份访问（全部历史可见）；
+#   key    = 密钥模式：使用管理员密钥或 API Key 验证；
+#   register = 注册模式：用户名即注册（无密码），各自历史隔离，输入管理员密钥则以管理员身份登录。
+ACCESS_MODE = _setting("access.mode", "ACCESS_MODE", "admin")
 
 COMFYUI_BASE_URL = _setting("comfyui.base_url", "COMFYUI_BASE_URL", "http://127.0.0.1:8188")
 COMFYUI_TIMEOUT = _setting("comfyui.timeout_seconds", "COMFYUI_TIMEOUT", 60, int)
@@ -99,20 +102,75 @@ COMFYUI_AUDIO_VAE = _setting(
     "COMFYUI_AUDIO_VAE",
     "minimax_h3_audio_vae_fp32.safetensors",
 )
-# NSFW 风格 Lora：仅应用于 fl2v 工作流（video_api.json），由 nsfw_strength
-# 参数（五档强度，见 nsfw_lora_levels）控制加载强度；多模态参考工作流不加载。
-# nsfw_lora_name 留空表示未配置，NSFW 风格 Lora 功能整体禁用（前端不渲染选项）。
-COMFYUI_NSFW_LORA_NAME = _setting(
-    "comfyui.lora.nsfw_lora_name",
-    "COMFYUI_NSFW_LORA_NAME",
+# 原生 NSFW 扩散模型：作为 fl2v 家族（文/首帧/尾帧/首尾帧）的一个 NSFW 档位出现，
+# 选中后直接把 UNETLoader 基模替换为该模型，**不挂任何 LoRA**（与 NSFW LoRA 档位互斥）。
+# 多模态参考（ref2v）不支持换基模，该档位不出现在 ref2v。留空表示未配置该档位。
+COMFYUI_NSFW_NATIVE_MODEL = _setting(
+    "comfyui.models.nsfw_native_diffusion",
+    "COMFYUI_NSFW_NATIVE_MODEL",
     "",
 )
-COMFYUI_NSFW_LORA_ENABLED = bool(COMFYUI_NSFW_LORA_NAME)
-COMFYUI_NSFW_LORA_LEVELS: list[float] = [
-    float(part)
-    for part in _setting("comfyui.lora.nsfw_lora_levels", "COMFYUI_NSFW_LORA_LEVELS", "0,0.3,0.5,0.7,1.0").split(",")
-    if part.strip()
-]
+COMFYUI_NSFW_NATIVE_ENABLED = bool(COMFYUI_NSFW_NATIVE_MODEL)
+# NSFW 档位：fl2v 家族（文/首帧/尾帧/首尾帧）与多模态参考（ref2v）各自一组 LoRA 配方，
+# 每个档位可叠加多个 LoRA（按配置顺序串联）。与原生基模档位互斥（二选一）。
+# LoRA 档位与 turbo 加速互斥：蒸馏 LoRA 与 NSFW LoRA 不能叠加；
+# 原生基模档位不挂 LoRA，因此仍可与 turbo 组合。
+# 未配置任何档位时该模式的 NSFW 下拉不渲染，接口传 nsfw=true 返回 400。
+# 结构为列表，仅支持 config.yml 配置（不提供环境变量覆盖）。
+def _nsfw_presets(path: str) -> list[dict[str, Any]]:
+    """解析 NSFW LoRA 档位：每档 = 一组按序叠加的 (lora 文件名, strength)。"""
+    presets: list[dict[str, Any]] = []
+    for index, item in enumerate(_nested(path, []) or []):
+        if not isinstance(item, dict):
+            continue
+        loras: list[dict[str, Any]] = []
+        for entry in item.get("loras") or []:
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("lora") or entry.get("name") or "").strip()
+            if not name:
+                continue
+            try:
+                strength = float(entry.get("strength", 1.0))
+            except (TypeError, ValueError):
+                strength = 1.0
+            loras.append({"name": name, "strength": strength})
+        if not loras:
+            continue
+        preset_id = str(item.get("id") or f"preset-{index + 1}").strip()
+        presets.append(
+            {"id": preset_id, "label": str(item.get("label") or preset_id).strip(), "loras": loras}
+        )
+    return presets
+
+
+NSFW_PRESETS = {
+    "fl2v": _nsfw_presets("comfyui.nsfw.fl2v_presets"),
+    "ref2v": _nsfw_presets("comfyui.nsfw.ref2v_presets"),
+}
+
+# Turbo 蒸馏 Lora（lightx2v）：fl2v（文/首帧/尾帧/首尾帧）与 ref2v（多模态参考）各自一份。
+# 步数直接写入 BasicScheduler.steps（配合 MiniMaxH3SigmaShift 重新生成对应步数的 sigma 网格，
+# 不做任何跳步/sigma 子集处理）；shift 参数为官方文档给定的 video/audio 训练偏移。
+# lora 文件名留空表示该档未配置，前端不渲染对应分辨率档位。
+COMFYUI_TURBO_FL2V_8STEP_LORA = _setting(
+    "comfyui.turbo.fl2v_8step_lora", "COMFYUI_TURBO_FL2V_8STEP_LORA", ""
+)
+COMFYUI_TURBO_FL2V_8STEP_SHIFT = _setting(
+    "comfyui.turbo.fl2v_8step_shift", "COMFYUI_TURBO_FL2V_8STEP_SHIFT", "12,3"
+)
+COMFYUI_TURBO_FL2V_4STEP_LORA = _setting(
+    "comfyui.turbo.fl2v_4step_lora", "COMFYUI_TURBO_FL2V_4STEP_LORA", ""
+)
+COMFYUI_TURBO_FL2V_4STEP_SHIFT = _setting(
+    "comfyui.turbo.fl2v_4step_shift", "COMFYUI_TURBO_FL2V_4STEP_SHIFT", "6,3"
+)
+COMFYUI_TURBO_REF2V_4STEP_LORA = _setting(
+    "comfyui.turbo.ref2v_4step_lora", "COMFYUI_TURBO_REF2V_4STEP_LORA", ""
+)
+COMFYUI_TURBO_REF2V_4STEP_SHIFT = _setting(
+    "comfyui.turbo.ref2v_4step_shift", "COMFYUI_TURBO_REF2V_4STEP_SHIFT", "12,3"
+)
 
 LLM_BASE_URL = _setting("llm.base_url", "LLM_BASE_URL", "http://127.0.0.1:8000/v1")
 LLM_API_KEY = _setting("llm.api_key", "LLM_API_KEY", "")
@@ -125,8 +183,13 @@ LLM_CONTEXT_MARGIN_TOKENS = _setting(
 LLM_MIN_COMPLETION_TOKENS = _setting(
     "llm.min_completion_tokens", "LLM_MIN_COMPLETION_TOKENS", 512, int
 )
+# 思考模式力度（reasoning effort）：low / medium / high；留空表示不发送该参数，
+# 同时回退为 chat_template_kwargs.enable_thinking=false（本地 vLLM 风格部署）。
+LLM_REASONING_EFFORT = _setting(
+    "llm.reasoning_effort", "LLM_REASONING_EFFORT", "low"
+).strip().lower()
 # NSFW 破甲提示词开关：true 时润色系统提示词追加成人向放行指令，
-# 由该全局配置单独控制，与任务 nsfw_strength 无关（NSFW 风格指南仍按任务等级注入）。
+# 由该全局配置单独控制，与任务 NSFW 开关无关（NSFW 风格指南仍按任务开关注入）。
 LLM_NSFW_ARMOR = _setting("llm.nsfw_armor", "LLM_NSFW_ARMOR", False, bool)
 
 VIDEO_DEFAULT_DURATION = _setting("video.duration.default", "VIDEO_DEFAULT_DURATION", 5, float)

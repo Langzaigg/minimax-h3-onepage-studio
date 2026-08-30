@@ -1,6 +1,7 @@
 import os
 import tempfile
 import math
+import logging
 from io import BytesIO
 from pathlib import Path
 from typing import Annotated
@@ -21,6 +22,9 @@ from config import (
 from models.video import PromptPolishResponse, VideoQueueStatus, VideoTaskList, VideoTaskSummary
 from routers.access import require_video_access
 from services import video_generation as video_service
+
+
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter(prefix="/api/video", dependencies=[Depends(require_video_access)])
@@ -125,19 +129,74 @@ def validate_reference_counts(images: int, videos: int, audios: int) -> None:
         raise HTTPException(status_code=400, detail="请至少上传一个参考图片、视频或音频")
 
 
-def validate_nsfw_strength(value: float) -> float:
-    """NSFW Lora 强度仅允许配置的档位（默认 0 / 0.3 / 0.5 / 0.7 / 1.0）。
+def resolve_nsfw(nsfw: bool, nsfw_preset: str, mode: str) -> dict | None:
+    """解析任务的 NSFW 档位（含该档要叠加的 LoRA 列表），关闭时返回 None。
 
-    该参数在 fl2v 工作流中生效；多模态参考生成接口同样接收并记录，
-    但不影响参考工作流（与前端“选项不禁用但不生效”的行为一致）。
-    未配置 nsfw lora（nsfw_lora_name 为空）时，仅允许 0，功能整体禁用。
+    - fl2v 家族与多模态参考（ref2v）各自一组 LoRA 档位；fl2v 额外提供「原生基模」档位
+      （id=native，替换 UNETLoader 基模、不挂 LoRA），与 LoRA 档位二选一互斥。
+    - 开启但未指定档位时回落到该模式第一个 LoRA 档位（历史任务兼容）；
+      旧参数 nsfw_native=true 由调用方映射为 native 档位。
     """
-    allowed = video_service.COMFYUI_NSFW_LORA_LEVELS
-    if not any(abs(value - level) < 1e-9 for level in allowed):
-        raise HTTPException(status_code=400, detail=f"nsfw_strength 仅支持 {' / '.join(map(str, allowed))}")
-    if value > 0 and not video_service.COMFYUI_NSFW_LORA_ENABLED:
-        raise HTTPException(status_code=400, detail="未配置 NSFW 风格 Lora（comfyui.lora.nsfw_lora_name 为空），nsfw_strength 仅支持 0")
-    return value
+    if not nsfw:
+        return None
+    reference = mode == "reference_to_video"
+    family = "多模态参考模式" if reference else "当前模式"
+    available = list(video_service.nsfw_preset_ids(mode))
+    if not reference and video_service.COMFYUI_NSFW_NATIVE_ENABLED:
+        available.append(video_service.NSFW_NATIVE_PRESET_ID)
+    if not available:
+        group = "ref2v" if reference else "fl2v"
+        detail = (
+            f"{family}未配置任何 NSFW 档位（comfyui.nsfw.{group}_presets 为空"
+            + ("" if reference else " 且未配置 comfyui.models.nsfw_native_diffusion") + "）"
+        )
+        raise HTTPException(status_code=400, detail=detail)
+    preset = video_service.resolve_nsfw_preset(nsfw_preset, mode)
+    if preset is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"不支持的 NSFW 档位：{nsfw_preset}（{family}可用档位：{' / '.join(available)}）",
+        )
+    return preset
+
+
+def validate_nsfw_turbo_conflict(nsfw_preset: dict | None, turbo: dict | None) -> None:
+    """NSFW LoRA 与 turbo 蒸馏 LoRA 互斥：两者不可叠加，只能选其一。
+
+    仅 LoRA 档位受限；「原生基模」档位不挂 LoRA，仍可与 turbo 组合。
+    """
+    if nsfw_preset and turbo and not nsfw_preset.get("native"):
+        raise HTTPException(
+            status_code=400,
+            detail="NSFW LoRA 与 turbo 加速不能同时使用，请关闭 NSFW 或选择普通分辨率档位",
+        )
+
+
+def _merge_nsfw(nsfw: bool, nsfw_native: bool, nsfw_strength: float) -> bool:
+    """兼容历史参数：nsfw_native=true 或 nsfw_strength>0 一律回落为 nsfw=true（开启）。"""
+    return bool(nsfw or nsfw_native or float(nsfw_strength or 0) > 0)
+
+
+def resolve_resolution(
+    resolution_preset: str, resolution_megapixels: float, mode: str
+) -> tuple[float, str | None, dict | None]:
+    """解析分辨率档位。
+
+    返回 (有效兆像素, 档位 id, turbo 工作流参数)：
+    - 空档位 → 普通工作流，使用 resolution_megapixels；
+    - turbo-* → 校验当前模式是否支持且对应 lora 已配置，返回档位对应的 MP 与 turbo 参数。
+    """
+    preset = (resolution_preset or "").strip()
+    if not preset:
+        return resolution_megapixels, None, None
+    turbo = video_service.resolve_turbo_preset(preset, mode)
+    if turbo is None:
+        allowed = " / ".join(video_service.turbo_preset_ids(mode)) or "无"
+        raise HTTPException(
+            status_code=400,
+            detail=f"不支持的分辨率档位：{preset}（当前模式可用 turbo 档位：{allowed}）",
+        )
+    return float(turbo["megapixels"]), preset, turbo
 
 
 def validate_reference_uploads(
@@ -158,13 +217,18 @@ def validate_reference_uploads(
 async def prompt_polish(
     prompt: Annotated[str, Form(min_length=1)],
     duration: Annotated[float, Form(ge=VIDEO_MIN_DURATION, le=VIDEO_MAX_DURATION)] = VIDEO_DEFAULT_DURATION,
-    nsfw_strength: Annotated[
-        float, Form(description="NSFW 风格 Lora 强度，仅支持 0 / 0.3 / 0.5 / 0.7 / 1.0；>0 时润色注入 NSFW 风格指南")
-    ] = 0.0,
+    nsfw: Annotated[
+        bool, Form(description="NSFW 开关：true 时润色注入 NSFW 风格指南，生成时叠加 NSFW LoRA")
+    ] = False,
+    nsfw_preset: Annotated[
+        str, Form(description="NSFW 档位 id（见 /api/config 的 nsfw_presets.fl2v）；留空用第一个档位")
+    ] = "",
+    nsfw_strength: Annotated[float, Form(description="已废弃：>0 视为 nsfw=true")] = 0.0,
+    nsfw_native: Annotated[bool, Form(description="已废弃：true 视为 nsfw=true")] = False,
     first_frame: UploadFile | None = File(None),
     last_frame: UploadFile | None = File(None),
 ):
-    validate_nsfw_strength(nsfw_strength)
+    nsfw = _merge_nsfw(nsfw, nsfw_native, nsfw_strength)
     paths: list[Path] = []
     try:
         for upload in (first_frame, last_frame):
@@ -172,13 +236,15 @@ async def prompt_polish(
             if path:
                 paths.append(path)
         mode = derive_mode(first_frame is not None, last_frame is not None)
+        nsfw = bool(resolve_nsfw(nsfw, nsfw_preset, mode))
         result = await run_in_threadpool(
-            video_service.polish_prompt, prompt, mode, duration, paths, nsfw_strength
+            video_service.polish_prompt, prompt, mode, duration, paths, nsfw
         )
         return {"prompt": result, "model": video_service.VIDEO_MODEL, "mode": mode}
     except HTTPException:
         raise
     except Exception as error:
+        logger.exception("prompt-polish 润色失败")
         raise HTTPException(status_code=502, detail=f"提示词润色失败：{error}")
     finally:
         for path in paths:
@@ -189,15 +255,24 @@ async def prompt_polish(
 async def reference_prompt_polish(
     prompt: Annotated[str, Form(min_length=1)],
     duration: Annotated[float, Form(ge=VIDEO_MIN_DURATION, le=VIDEO_MAX_DURATION)] = VIDEO_DEFAULT_DURATION,
-    nsfw_strength: Annotated[
-        float, Form(description="NSFW 风格 Lora 强度，仅支持 0 / 0.3 / 0.5 / 0.7 / 1.0；参考模式不加载 lora，但 >0 时润色仍注入 NSFW 风格指南")
-    ] = 0.0,
+    nsfw: Annotated[
+        bool, Form(description="NSFW 开关：true 时润色注入 NSFW 风格指南，生成时叠加 ref2v NSFW LoRA")
+    ] = False,
+    nsfw_preset: Annotated[
+        str, Form(description="NSFW 档位 id（见 /api/config 的 nsfw_presets.ref2v）；留空用第一个档位")
+    ] = "",
+    nsfw_strength: Annotated[float, Form(description="已废弃：>0 视为 nsfw=true")] = 0.0,
+    nsfw_native: Annotated[bool, Form(description="已废弃：true 视为 nsfw=true")] = False,
     use_video_audio: Annotated[bool, Form()] = True,
     reference_images: list[UploadFile] = File(default=[]),
     reference_videos: list[UploadFile] = File(default=[]),
     reference_audios: list[UploadFile] = File(default=[]),
 ):
-    validate_nsfw_strength(nsfw_strength)
+    nsfw = bool(
+        resolve_nsfw(
+            _merge_nsfw(nsfw, nsfw_native, nsfw_strength), nsfw_preset, "reference_to_video"
+        )
+    )
     validate_reference_counts(len(reference_images), len(reference_videos), len(reference_audios))
     validate_reference_uploads(reference_images, reference_videos, reference_audios)
     groups: list[list[tuple[Path, str]]] = []
@@ -212,12 +287,13 @@ async def reference_prompt_polish(
             [path for path, _ in groups[1]],
             [path for path, _ in groups[2]],
             use_video_audio,
-            nsfw_strength,
+            nsfw,
         )
         return {"prompt": result, "model": video_service.VIDEO_MODEL, "mode": "reference_to_video"}
     except HTTPException:
         raise
     except Exception as error:
+        logger.exception("reference-prompt-polish 全参考润色失败")
         raise HTTPException(status_code=502, detail=f"全参考提示词润色失败：{error}")
     finally:
         for group in groups:
@@ -231,6 +307,9 @@ async def _create_video_task_impl(
     resolution_megapixels: Annotated[
         float, Form(ge=VIDEO_MIN_MEGAPIXELS, le=VIDEO_MAX_MEGAPIXELS)
     ] = VIDEO_DEFAULT_MEGAPIXELS,
+    resolution_preset: Annotated[
+        str, Form(description="分辨率档位：留空走普通工作流；turbo-0.5-6 / turbo-0.5-8 / turbo-1.0-4 为 turbo 蒸馏档位")
+    ] = "",
     aspect_ratio: Annotated[
         str, Form(description="默认 auto：首帧 → 末帧 → 16:9")
     ] = "auto",
@@ -239,24 +318,35 @@ async def _create_video_task_impl(
     last_frame: UploadFile | None = File(None),
     auto_polish: bool = False,
     owner: str = "admin",
-    nsfw_strength: float = 0.0,
+    nsfw: bool = False,
+    nsfw_preset: str = "",
 ):
-    validate_nsfw_strength(nsfw_strength)
     first_content = await first_frame.read() if first_frame else None
     last_content = await last_frame.read() if last_frame else None
     mode = derive_mode(bool(first_content), bool(last_content))
+    nsfw_preset_id = resolve_nsfw(nsfw, nsfw_preset, mode)
     first_ratio = image_ratio(first_content) if first_content else None
     last_ratio = image_ratio(last_content) if last_content else None
+    effective_megapixels, preset_id, turbo = resolve_resolution(
+        resolution_preset, resolution_megapixels, mode
+    )
+    validate_nsfw_turbo_conflict(nsfw_preset_id, turbo)
     warnings = []
     if duration >= 8:
         warnings.append("时长达到 8 秒或以上，生成时间会很长。")
-    if resolution_megapixels > 0.5:
+    if effective_megapixels > 0.5:
         warnings.append("分辨率高于 0.5 MP，生成时间会很长。")
     if first_ratio and last_ratio and abs(first_ratio - last_ratio) / max(first_ratio, last_ratio) > 0.03:
         warnings.append("首帧与末帧画面比例不一致，生成时会按所选比例居中裁剪。")
     effective_aspect_ratio, ratio = resolve_aspect_ratio(aspect_ratio, first_ratio, last_ratio)
-    width, height = dimensions(resolution_megapixels, ratio)
-    extras = {"nsfw_strength": nsfw_strength}
+    width, height = dimensions(effective_megapixels, ratio)
+    extras = {
+        "nsfw": bool(nsfw_preset_id),
+        "nsfw_preset": nsfw_preset_id["id"] if nsfw_preset_id else None,
+        "resolution_preset": preset_id,
+    }
+    if turbo:
+        extras["turbo_steps"] = int(turbo["steps"])
     if auto_polish:
         extras["original_prompt"] = prompt.strip()
     record = video_service.create_task_record(
@@ -265,7 +355,7 @@ async def _create_video_task_impl(
         duration=duration,
         width=width,
         height=height,
-        resolution_megapixels=resolution_megapixels,
+        resolution_megapixels=effective_megapixels,
         aspect_ratio=effective_aspect_ratio,
         seed=seed,
         warnings=warnings,
@@ -297,6 +387,9 @@ async def _create_reference_video_task_impl(
     resolution_megapixels: Annotated[
         float, Form(ge=VIDEO_MIN_MEGAPIXELS, le=VIDEO_MAX_MEGAPIXELS)
     ] = VIDEO_DEFAULT_MEGAPIXELS,
+    resolution_preset: Annotated[
+        str, Form(description="分辨率档位：留空走普通工作流；turbo-0.5-4 / turbo-0.5-6 / turbo-0.5-8 共用同一个 turbo lora")
+    ] = "",
     aspect_ratio: Annotated[
         str, Form(description="默认 auto：首帧 → 末帧 → 第一张参考图片 → 16:9")
     ] = "auto",
@@ -308,17 +401,22 @@ async def _create_reference_video_task_impl(
     reference_audios: list[UploadFile] = File(default=[]),
     auto_polish: bool = False,
     owner: str = "admin",
-    nsfw_strength: float = 0.0,
+    nsfw: bool = False,
+    nsfw_preset: str = "",
 ):
-    # 参考生成接口同样接收 nsfw_strength（前端选项不禁用），
-    # 但仅记录到任务元数据，不应用于参考工作流（NSFW Lora 只作用于 fl2v 工作流）。
-    validate_nsfw_strength(nsfw_strength)
+    # 参考生成接口的 NSFW 由 ref2v 专属 LoRA 档位提供（不替换 Ref2VA 基模），
+    # 仅普通工作流可用，与 turbo 加速互斥；未配置档位时拒绝开启。
+    nsfw_preset_id = resolve_nsfw(nsfw, nsfw_preset, "reference_to_video")
     validate_reference_counts(len(reference_images), len(reference_videos), len(reference_audios))
     validate_reference_uploads(reference_images, reference_videos, reference_audios)
     if aspect_ratio != "auto" and aspect_ratio not in ASPECT_RATIOS:
         raise HTTPException(status_code=400, detail="不支持的画面比例")
     if ref_image_size not in {"match", "max"}:
         raise HTTPException(status_code=400, detail="ref_image_size 仅支持 match 或 max")
+    effective_megapixels, preset_id, turbo = resolve_resolution(
+        resolution_preset, resolution_megapixels, "reference_to_video"
+    )
+    validate_nsfw_turbo_conflict(nsfw_preset_id, turbo)
     groups: list[list[tuple[UploadFile, bytes]]] = []
     for uploads in (reference_images, reference_videos, reference_audios):
         group = []
@@ -334,34 +432,39 @@ async def _create_reference_video_task_impl(
     warnings = []
     if duration >= 8:
         warnings.append("时长达到 8 秒或以上，生成时间会很长。")
-    if resolution_megapixels > 0.5:
+    if effective_megapixels > 0.5:
         warnings.append("分辨率高于 0.5 MP，生成时间会很长。")
     if ref_image_size == "max":
         warnings.append("参考图保真度选择 max，参考 token 会参与每一步采样，生成时间会显著增加。")
     effective_aspect_ratio, ratio = resolve_aspect_ratio(
         aspect_ratio, None, None, first_reference_ratio
     )
-    width, height = dimensions(resolution_megapixels, ratio)
+    width, height = dimensions(effective_megapixels, ratio)
     counts = {"images": len(groups[0]), "videos": len(groups[1]), "audios": len(groups[2])}
+    extras = {
+        "reference_counts": counts,
+        "ref_image_size": ref_image_size,
+        "use_video_audio": use_video_audio,
+        "nsfw": bool(nsfw_preset_id),
+        "nsfw_preset": nsfw_preset_id["id"] if nsfw_preset_id else None,
+        "resolution_preset": preset_id,
+        "_reference_assets": [],
+        **({"original_prompt": prompt.strip()} if auto_polish else {}),
+    }
+    if turbo:
+        extras["turbo_steps"] = int(turbo["steps"])
     record = video_service.create_task_record(
         mode="reference_to_video",
         prompt=prompt.strip(),
         duration=duration,
         width=width,
         height=height,
-        resolution_megapixels=resolution_megapixels,
+        resolution_megapixels=effective_megapixels,
         aspect_ratio=effective_aspect_ratio,
         seed=seed,
         warnings=warnings,
         owner=owner,
-        extras={
-            "reference_counts": counts,
-            "ref_image_size": ref_image_size,
-            "use_video_audio": use_video_audio,
-            "nsfw_strength": nsfw_strength,
-            "_reference_assets": [],
-            **({"original_prompt": prompt.strip()} if auto_polish else {}),
-        },
+        extras=extras,
     )
     try:
         for kind, group in zip(("image", "video", "audio"), groups):
@@ -394,6 +497,9 @@ async def create_video_task(
     resolution_megapixels: Annotated[
         float, Form(ge=VIDEO_MIN_MEGAPIXELS, le=VIDEO_MAX_MEGAPIXELS)
     ] = VIDEO_DEFAULT_MEGAPIXELS,
+    resolution_preset: Annotated[
+        str, Form(description="分辨率档位：留空走普通工作流；turbo-0.5-6 / turbo-0.5-8 / turbo-1.0-4 为 turbo 蒸馏档位")
+    ] = "",
     aspect_ratio: Annotated[
         str, Form(description="默认 auto：首帧 → 末帧 → 16:9")
     ] = "auto",
@@ -401,17 +507,28 @@ async def create_video_task(
     polish_prompt_first: Annotated[
         bool, Form(description="默认 false 直接生成；true 时先用配置的视觉模型润色，再自动生成")
     ] = False,
-    nsfw_strength: Annotated[
-        float, Form(description="NSFW 风格 Lora 强度，仅支持 0 / 0.3 / 0.5 / 0.7 / 1.0 五档，仅在 fl2v 工作流生效")
-    ] = 0.0,
+    nsfw: Annotated[
+        bool, Form(description="NSFW 开关：true 时叠加 NSFW LoRA 并注入风格指南；仅普通档位可用，与 turbo 互斥")
+    ] = False,
+    nsfw_preset: Annotated[
+        str, Form(description="NSFW 档位 id（见 /api/config 的 nsfw_presets.fl2v）；留空用第一个档位")
+    ] = "",
+    nsfw_strength: Annotated[float, Form(description="已废弃：>0 视为 nsfw=true")] = 0.0,
+    nsfw_native: Annotated[bool, Form(description="已废弃：true 视为 nsfw=true")] = False,
     first_frame: UploadFile | None = File(None),
     last_frame: UploadFile | None = File(None),
     access: dict = Depends(require_video_access),
 ):
     """直接使用提交的提示词生成；不含图片、仅首帧、仅尾帧、首尾帧共用同一工作流。"""
+    # 历史参数 nsfw_native=true（fl2v 家族）回落为「原生基模」档位（nsfw_preset=native）；
+    # 显式传了 nsfw_preset 时以显式值为准。
+    nsfw_on = _merge_nsfw(nsfw, nsfw_native, nsfw_strength)
+    legacy_native = nsfw_native and not nsfw_preset
     return await _create_video_task_impl(
-        prompt, duration, resolution_megapixels, aspect_ratio, seed, first_frame, last_frame,
-        polish_prompt_first, access["key_id"], nsfw_strength,
+        prompt, duration, resolution_megapixels, resolution_preset, aspect_ratio, seed,
+        first_frame, last_frame, polish_prompt_first, access["key_id"],
+        nsfw_on,
+        nsfw_preset or (video_service.NSFW_NATIVE_PRESET_ID if legacy_native else ""),
     )
 
 
@@ -428,6 +545,9 @@ async def create_reference_video_task(
     resolution_megapixels: Annotated[
         float, Form(ge=VIDEO_MIN_MEGAPIXELS, le=VIDEO_MAX_MEGAPIXELS)
     ] = VIDEO_DEFAULT_MEGAPIXELS,
+    resolution_preset: Annotated[
+        str, Form(description="分辨率档位：留空走普通工作流；turbo-0.5-4 / turbo-0.5-6 / turbo-0.5-8 共用同一个 turbo lora")
+    ] = "",
     aspect_ratio: Annotated[
         str, Form(description="默认 auto：首帧 → 末帧 → 第一张参考图片 → 16:9")
     ] = "auto",
@@ -435,9 +555,14 @@ async def create_reference_video_task(
     polish_prompt_first: Annotated[
         bool, Form(description="默认 false 直接生成；true 时先生成六段式参考提示词，再自动生成")
     ] = False,
-    nsfw_strength: Annotated[
-        float, Form(description="NSFW 风格 Lora 强度，仅支持 0 / 0.3 / 0.5 / 0.7 / 1.0 五档；参考模式仅记录不生效")
-    ] = 0.0,
+    nsfw: Annotated[
+        bool, Form(description="NSFW 开关：true 时普通 ref2v 工作流叠加 NSFW LoRA 并注入风格指南；与 turbo 档位互斥")
+    ] = False,
+    nsfw_preset: Annotated[
+        str, Form(description="NSFW 档位 id（见 /api/config 的 nsfw_presets.ref2v）；留空用第一个档位")
+    ] = "",
+    nsfw_strength: Annotated[float, Form(description="已废弃：>0 视为 nsfw=true")] = 0.0,
+    nsfw_native: Annotated[bool, Form(description="已废弃：true 视为 nsfw=true")] = False,
     ref_image_size: Annotated[str, Form()] = "match",
     use_video_audio: Annotated[bool, Form()] = True,
     reference_images: list[UploadFile] = File(default=[]),
@@ -446,10 +571,12 @@ async def create_reference_video_task(
     access: dict = Depends(require_video_access),
 ):
     """直接使用提交的六段式提示词，通过 R2V 工作流生成多模态参考视频。"""
+    # ref2v 不支持原生基模：历史参数 nsfw_native=true 仅视为 nsfw=true（回落默认 LoRA 档位）。
     return await _create_reference_video_task_impl(
-        prompt, duration, resolution_megapixels, aspect_ratio, seed, ref_image_size,
-        use_video_audio, reference_images, reference_videos, reference_audios, polish_prompt_first,
-        access["key_id"], nsfw_strength,
+        prompt, duration, resolution_megapixels, resolution_preset, aspect_ratio, seed,
+        ref_image_size, use_video_audio, reference_images, reference_videos, reference_audios,
+        polish_prompt_first, access["key_id"],
+        _merge_nsfw(nsfw, nsfw_native, nsfw_strength), nsfw_preset,
     )
 
 

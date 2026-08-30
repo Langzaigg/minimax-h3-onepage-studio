@@ -8,11 +8,12 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from config import (
     ACCESS_MODE,
-    COMFYUI_NSFW_LORA_ENABLED,
+    COMFYUI_NSFW_NATIVE_ENABLED,
     DAILY_STORAGE_CHECK_HOUR,
     DAILY_STORAGE_CHECK_MINUTE,
     FFMPEG_PATH,
     HISTORY_RETENTION_DAYS,
+    NSFW_PRESETS,
     PROJECT_ROOT,
     VIDEO_DEFAULT_DURATION,
     VIDEO_DEFAULT_MEGAPIXELS,
@@ -28,6 +29,7 @@ from routers import access, admin, video
 from services import access_control
 from services.storage_maintenance import cleanup_expired_history, emergency_cleanup_if_needed
 from services.video_generation import resume_incomplete_tasks, shutdown_background_tasks
+from services import video_generation as video_service
 
 
 def seconds_until_weekly_cleanup(now: datetime) -> float:
@@ -154,7 +156,23 @@ async def frontend_config():
         },
         "ffmpeg_enabled": bool(FFMPEG_PATH),
         "access_mode": ACCESS_MODE,
-        "nsfw_lora_enabled": bool(COMFYUI_NSFW_LORA_ENABLED),
+        # NSFW 档位：fl2v 家族与多模态参考（ref2v）各自一组 LoRA 配方；
+        # fl2v 额外在末尾追加「原生基模」档位（native: true，替换基模、不挂 LoRA，
+        # 仅该档位可与 turbo 组合）。前端据此渲染 NSFW 下拉。
+        "nsfw_presets": {
+            "fl2v": (
+                [{"id": preset["id"], "label": preset["label"]} for preset in NSFW_PRESETS["fl2v"]]
+                + ([{"id": "native", "label": "原生基模", "native": True}] if COMFYUI_NSFW_NATIVE_ENABLED else [])
+            ),
+            "ref2v": [
+                {"id": preset["id"], "label": preset["label"]} for preset in NSFW_PRESETS["ref2v"]
+            ],
+        },
+        # turbo 蒸馏档位可用性：按模式返回可用档位 id，供前端渲染分辨率下拉。
+        "turbo_presets": {
+            "fl2v": video_service.turbo_preset_ids("text_to_video"),
+            "ref2v": video_service.turbo_preset_ids("reference_to_video"),
+        },
     }
 
 

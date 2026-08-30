@@ -11,9 +11,10 @@ server:
   git_pull_timeout_seconds: 120
 
 access:
-  # key = 密钥模式（默认）：管理员/API Key 访问
+  # admin（默认）= 管理员单用户模式：无需任何凭据，直接以管理员身份访问（全部历史可见）；
+  # key = 密钥模式：管理员/API Key 访问；
   # register = 注册模式：任意用户名即可注册使用（无密码），各自历史隔离；输入管理员密钥自动以管理员身份登录
-  mode: "key"
+  mode: "admin"
 
 comfyui:
   base_url: "http://127.0.0.1:8188"
@@ -21,30 +22,60 @@ comfyui:
   models:
     fl2va_diffusion: "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
     ref2va_diffusion: "minimax_h3_ref2va_pruned_int8_convrot.safetensors"
+    # 原生 NSFW 扩散模型：fl2v 家族「原生基模」档位（id=native，替换 UNETLoader 基模、不挂 LoRA），
+    # 与 nsfw.*_presets 的 LoRA 档位二选一互斥；该档位可与 turbo 组合。留空（""）则不出现该档位。
+    nsfw_native_diffusion: ""
     text_encoder: "qwen3vl_32b_minimax_h3_int8_convrot.safetensors"
     video_vae: "minimax_h3_video_vae_fp16.safetensors"
     audio_vae: "minimax_h3_audio_vae_fp32.safetensors"
-  # 采样加速（Spectrum Apply MiniMax H3），默认不启用；启用需在 ComfyUI 安装对应自定义节点
+  # NSFW LoRA 配方：每档可叠加多个 LoRA，按配置顺序串联在基模之后。
+  # 与「原生基模」档位二选一互斥；与 turbo 加速互斥（选中 LoRA 档位后 turbo 档位不可用）。
+  # 未配置任何档位时该模式不渲染 NSFW 下拉，接口传 nsfw=true 返回 400。
+  # fl2v = 文生视频 / 首帧 / 尾帧 / 首尾帧；ref2v = 多模态参考生成。
+  nsfw:
+    fl2v_presets: []   # 例：
+    # - id: "aio"
+    #   label: "AIO 1.0"
+    #   loras:
+    #     - {lora: "HMNSFW-AIO-V2.5.safetensors", strength: 1.0}
+    # - id: "aio-vagina"
+    #   label: "AIO 0.65 + Vagina 0.35"
+    #   loras:
+    #     - {lora: "HMNSFW-AIO-V2.5.safetensors", strength: 0.65}
+    #     - {lora: "Vagina_minimax-h3_epoch20.safetensors", strength: 0.35}
+    ref2v_presets: []  # 例：- {id: "aftermidnight", label: "AfterMidnight 1.0",
+    #        loras: [{lora: "AfterMidnight_ref2va_h3_sexytime_rank64-v1.2.safetensors", strength: 1.0}]}
+  # 采样加速（Spectrum Apply MiniMax H3），默认不启用；启用需在 ComfyUI 安装对应自定义节点；
+  # turbo 工作流不使用该节点。
   spectrum_apply:
     enabled: false
-  # NSFW 风格 Lora：由任务参数 nsfw_strength（五档强度）控制，仅应用于 fl2v 工作流；
-  # 多模态参考生成模式不加载。nsfw_lora_name 留空（""）表示未配置，该功能整体禁用，
-  # 前端不渲染 NSFW 强度选项。nsfw_lora_levels 为允许的五档强度（逗号分隔，必须包含 0）。
-  lora:
-    nsfw_lora_name: "SexyGod-NaughtyTimes-v2-rank512.safetensors"
-    nsfw_lora_levels: "0,0.3,0.5,0.7,1.0"
+  # Turbo 蒸馏 Lora（lightx2v）：fl2v 档位（文/首帧/尾帧/首尾帧共享）与 ref2v 档位（多模态参考）。
+  # 步数直接写入 BasicScheduler.steps（配合 MiniMaxH3SigmaShift 生成对应步数的 sigma 网格，不做跳步）；
+  # shift 为官方 video/audio 训练偏移（8step: 12,3；fl2v 4step 768p: 6,3；ref2v 4step: 12,3）。
+  # 文件名留空（""）表示对应 turbo 档位禁用，前端不渲染对应分辨率选项。
+  turbo:
+    fl2v_8step_lora: ""
+    fl2v_8step_shift: "12,3"
+    fl2v_4step_lora: ""
+    fl2v_4step_shift: "6,3"
+    ref2v_4step_lora: ""
+    ref2v_4step_shift: "12,3"
 
 llm:
   base_url: "http://127.0.0.1:8000/v1"
   api_key: ""
-  model: "vision-model"
+  model: "kimi-k2.7-code"
+  # 思考模式力度：low / medium / high；留空（""）则不发送 reasoning_effort，
+  # 并回退为 chat_template_kwargs.enable_thinking=false（本地 vLLM 风格部署）。
+  reasoning_effort: "low"
   timeout_seconds: 180
   context_window: 131000
   context_margin_tokens: 512
   min_completion_tokens: 512
 
 ffmpeg:
-  # 视频转 GIF 下载所需；留空则前端不显示 GIF 下载按钮
+  # 参考视频转 480p GIF 喂给润色模型、参考视频压缩到输出分辨率、视频转 GIF 下载均依赖该路径；
+  # 留空则这些功能自动降级（GIF 下载按钮不显示、润色回退为关键帧、参考视频原样上传）
   path: ""
 
 video:
@@ -52,7 +83,7 @@ video:
   resolution_megapixels: {default: 0.4, min: 0.2, max: 1.0}
 
 storage:
-  history_retention_days: 90
-  weekly_cleanup: {weekday: 0, hour: 3, minute: 0}
-  daily_storage_check: {hour: 0, minute: 5}
-  disk_usage_limit_percent: 90
+  retention_days: 90
+  weekly_cleanup: {weekday: 6, hour: 3, minute: 0}
+  daily_disk_check: {hour: 0, minute: 5}
+  usage_threshold_percent: 90

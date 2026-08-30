@@ -23,16 +23,22 @@ from config import (
     COMFYUI_AUDIO_VAE,
     COMFYUI_BASE_URL,
     COMFYUI_FL2VA_MODEL,
-    COMFYUI_NSFW_LORA_ENABLED,
-    COMFYUI_NSFW_LORA_LEVELS,
-    COMFYUI_NSFW_LORA_NAME,
+    COMFYUI_NSFW_NATIVE_ENABLED,
+    COMFYUI_NSFW_NATIVE_MODEL,
     COMFYUI_REF2VA_MODEL,
     COMFYUI_SPECTRUM_ENABLED,
     COMFYUI_TEXT_ENCODER,
     COMFYUI_TIMEOUT,
+    COMFYUI_TURBO_FL2V_4STEP_LORA,
+    COMFYUI_TURBO_FL2V_4STEP_SHIFT,
+    COMFYUI_TURBO_FL2V_8STEP_LORA,
+    COMFYUI_TURBO_FL2V_8STEP_SHIFT,
+    COMFYUI_TURBO_REF2V_4STEP_LORA,
+    COMFYUI_TURBO_REF2V_4STEP_SHIFT,
     COMFYUI_VIDEO_VAE,
     FFMPEG_PATH,
     LLM_NSFW_ARMOR,
+    NSFW_PRESETS,
     VIDEO_DATA_FOLDER,
     VIDEO_MODEL,
     VIDEO_WORKFLOW_FOLDER,
@@ -395,7 +401,7 @@ _NSFW_GUIDE_TEXT = (
 )
 
 
-def _polish_system(guide: str, task_name: str, ref_mode: bool = False, nsfw_strength: float = 0.0) -> str:
+def _polish_system(guide: str, task_name: str, ref_mode: bool = False, nsfw: bool = False) -> str:
     role = "full-reference" if ref_mode else "audiovisual"
     system = (
         f"You are a professional MiniMax H3 {role} prompt editor. Rewrite the user's idea in English "
@@ -414,16 +420,18 @@ def _polish_system(guide: str, task_name: str, ref_mode: bool = False, nsfw_stre
         "Return only the final prompt, with no code fence or commentary."
     )
     # 破甲提示词（成人向放行）由全局配置 llm.nsfw_armor 单独开关控制；
-    # NSFW 风格指南仅在本任务启用了 NSFW 等级（nsfw_strength > 0）时注入。
-    # 参考模式虽不加载 lora，但润色同样注入风格指南。
+    # NSFW 风格指南仅在本任务开启 NSFW（nsfw=true）时注入。
+    # 参考模式虽不替换基模，但润色同样注入风格指南。
     if LLM_NSFW_ARMOR:
         system += "\n\n" + _NSFW_ARMOR_TEXT
-    if nsfw_strength > 0:
+    if nsfw:
         system += "\n\n" + _NSFW_GUIDE_TEXT
     return system + "\n\nPROMPT GUIDE:\n" + guide
 
 
-def polish_prompt(prompt: str, mode: str, duration: float, images: list[Path], nsfw_strength: float = 0.0) -> str:
+def polish_prompt(
+    prompt: str, mode: str, duration: float, images: list[Path], nsfw: bool = False,
+) -> str:
     guide_path = Path(VIDEO_WORKFLOW_FOLDER) / "VIDEO_PROMPT_WRITING_GUIDE_base_en.md"
     guide = guide_path.read_text(encoding="utf-8")
     task_name = {
@@ -432,7 +440,7 @@ def polish_prompt(prompt: str, mode: str, duration: float, images: list[Path], n
         "last_frame": "L2VA",
         "first_last_frame": "FL2VA",
     }[mode]
-    system = _polish_system(guide, task_name, nsfw_strength=nsfw_strength)
+    system = _polish_system(guide, task_name, nsfw=nsfw)
     content: list[dict[str, Any]] = [
         {
             "type": "text",
@@ -449,7 +457,7 @@ def polish_prompt(prompt: str, mode: str, duration: float, images: list[Path], n
         {"role": "system", "content": system},
         {"role": "user", "content": content},
     ]
-    options = CompletionOptions(model=VIDEO_MODEL, temperature=0.2, max_tokens=5000)
+    options = CompletionOptions(model=VIDEO_MODEL)
     result = _clean_polished_output(LLMClient().complete_text(messages, options))
     if not result:
         raise RuntimeError("模型未返回润色后的提示词")
@@ -500,8 +508,16 @@ def _media_summary(path: Path) -> str:
     return ", ".join(parts)
 
 
+def _ffmpeg_executable() -> str | None:
+    """返回可用的 ffmpeg 可执行文件路径：优先用 config.yml 配置的 ffmpeg.path，
+    未配置时回退到 PATH 上的 ffmpeg；都没有则返回 None。"""
+    if FFMPEG_PATH:
+        return FFMPEG_PATH
+    return shutil.which("ffmpeg")
+
+
 def _extract_video_frames(video: Path, folder: Path) -> list[Path]:
-    executable = shutil.which("ffmpeg")
+    executable = _ffmpeg_executable()
     if not executable:
         return []
     info = _probe_media(video)
@@ -528,7 +544,7 @@ def _extract_video_frames(video: Path, folder: Path) -> list[Path]:
 
 
 def _audio_spectrogram(audio: Path, folder: Path) -> Path | None:
-    executable = shutil.which("ffmpeg")
+    executable = _ffmpeg_executable()
     if not executable:
         return None
     output = folder / f"{audio.stem}_spectrogram.png"
@@ -544,6 +560,90 @@ def _audio_spectrogram(audio: Path, folder: Path) -> Path | None:
     return output if completed.returncode == 0 and output.is_file() else None
 
 
+# 参考视频转 480p GIF 的参数：最长边限制在 480px 内、10fps、最多取前 12 秒，
+# 配合调色板生成保证文件体积可控（约 0.5~3MB），适合作为多模态参考喂给润色模型。
+POLISH_GIF_MAX_SIDE = 480
+POLISH_GIF_FPS = 10
+POLISH_GIF_MAX_SECONDS = 12
+
+
+def _video_to_480p_gif(video: Path, folder: Path) -> Path | None:
+    """把参考视频转成 480p 动画 GIF（palette 方式），返回输出路径；失败返回 None。
+
+    生成内容仅用于喂给润色模型看运动信息，不影响提交给视频生成模型的原视频。
+    """
+    executable = _ffmpeg_executable()
+    if not executable:
+        return None
+    output = folder / f"{video.stem}_480p.gif"
+    completed = subprocess.run(
+        [
+            executable, "-y", "-t", str(POLISH_GIF_MAX_SECONDS), "-i", str(video),
+            "-vf",
+            f"fps={POLISH_GIF_FPS},scale='min({POLISH_GIF_MAX_SIDE},iw)':-2:flags=lanczos,"
+            "split[s0][s1];[s0]palettegen=stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=5",
+            "-loop", "0",
+            str(output),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=300,
+        check=False,
+    )
+    if completed.returncode != 0 or not output.is_file() or output.stat().st_size == 0:
+        output.unlink(missing_ok=True)
+        return None
+    return output
+
+
+def _polish_gif_data_url(gif: Path) -> str:
+    """构造润色模型用的 GIF data URL（保持动画，不经过 PIL 重编码）。"""
+    return f"data:image/gif;base64,{base64.b64encode(gif.read_bytes()).decode('ascii')}"
+
+
+def _resize_reference_video(video: Path, width: int, height: int, fps: float) -> Path | None:
+    """把参考视频重编码到与输出一致的分辨率和帧率（H.264/mp4），返回临时文件；失败返回 None。
+
+    供提交给视频生成模型（ref2v）使用：参考视频仍保持视频格式，但先用 ffmpeg 压缩到与
+    输出分辨率一致的大小和帧率（等比放大覆盖后居中裁剪到 WxH，帧率对齐目标帧数/时长），
+    保证参考帧数与目标时长对齐，同时降低 ComfyUI 端解码与 VAE 编码负载。
+    音频流重编码为 AAC（比 copy 更稳，避免源封装格式不兼容 mp4）。
+    """
+    executable = _ffmpeg_executable()
+    if not executable:
+        return None
+    handle, tmp_name = tempfile.mkstemp(prefix="h3_refvideo_", suffix=".mp4")
+    os.close(handle)
+    output = Path(tmp_name)
+    scale_crop = (
+        f"scale={width}:{height}:force_original_aspect_ratio=increase:flags=lanczos,"
+        f"crop={width}:{height}"
+    )
+    completed = subprocess.run(
+        [
+            executable, "-y", "-i", str(video),
+            "-vf", scale_crop,
+            "-r", f"{fps:.4f}",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "128k",
+            "-movflags", "+faststart",
+            str(output),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=600,
+        check=False,
+    )
+    if completed.returncode != 0 or not output.is_file() or output.stat().st_size == 0:
+        output.unlink(missing_ok=True)
+        return None
+    return output
+
+
 def polish_reference_prompt(
     prompt: str,
     duration: float,
@@ -551,7 +651,7 @@ def polish_reference_prompt(
     videos: list[Path],
     audios: list[Path],
     use_video_audio: bool,
-    nsfw_strength: float = 0.0,
+    nsfw: bool = False,
 ) -> str:
     base_guide = (Path(VIDEO_WORKFLOW_FOLDER) / "VIDEO_PROMPT_WRITING_GUIDE_base_en.md").read_text(
         encoding="utf-8"
@@ -559,7 +659,7 @@ def polish_reference_prompt(
     ref_guide = (Path(VIDEO_WORKFLOW_FOLDER) / "VIDEO_PROMPT_WRITING_GUIDE_ref_en.md").read_text(
         encoding="utf-8"
     )
-    system = _polish_system(base_guide, "full-reference", ref_mode=True, nsfw_strength=nsfw_strength)
+    system = _polish_system(base_guide, "full-reference", ref_mode=True, nsfw=nsfw)
     system += "\n\nFULL-REFERENCE GUIDE:\n" + ref_guide
     inventory = [
         f"Target duration: {duration:.2f} seconds",
@@ -592,7 +692,24 @@ def polish_reference_prompt(
         )
     with tempfile.TemporaryDirectory(prefix="video_ref_polish_") as temp_name:
         folder = Path(temp_name)
+        # 配置了 ffmpeg 时，每个参考视频转成 480p 动画 GIF 作为「视频参考信息」喂给润色模型，
+        # 让模型直接看到运动过程；未配置或转换失败时回退为抽取 3 张代表帧。
         for index, path in enumerate(videos, start=1):
+            gif = _video_to_480p_gif(path, folder) if FFMPEG_PATH else None
+            if gif:
+                content.extend(
+                    [
+                        {
+                            "type": "text",
+                            "text": (
+                                f"Animated GIF overview of <Video {index}> (video reference, "
+                                "shows motion; not a Picture label):"
+                            ),
+                        },
+                        {"type": "image_url", "image_url": {"url": _polish_gif_data_url(gif)}},
+                    ]
+                )
+                continue
             for frame_index, frame in enumerate(_extract_video_frames(path, folder), start=1):
                 content.extend(
                     [
@@ -623,12 +740,136 @@ def polish_reference_prompt(
         ]
         result = _clean_polished_output(
             LLMClient().complete_text(
-                messages, CompletionOptions(model=VIDEO_MODEL, temperature=0.2, max_tokens=9000)
+                messages, CompletionOptions(model=VIDEO_MODEL)
             )
         )
     if not result:
         raise RuntimeError("模型未返回润色后的全参考提示词")
     return result
+
+
+def _parse_shift(raw: str, fallback: tuple[float, float]) -> tuple[float, float]:
+    parts = [part for part in str(raw).replace(" ", "").split(",") if part]
+    if len(parts) == 2:
+        try:
+            return float(parts[0]), float(parts[1])
+        except ValueError:
+            pass
+    return fallback
+
+
+# ---------------------------------------------------------------------------
+# Turbo 蒸馏档位（lightx2v Lora）
+# fl2v（文/首帧/尾帧/首尾帧共享）：
+#   turbo-0.5-6 / turbo-0.5-8 → 8step lora（steps 直接写 6 / 8，不跳步）
+#   turbo-1.0-4               → 4step 768p lora（1.0 MP）
+# ref2v（多模态参考）：
+#   turbo-0.5-4 / turbo-0.5-6 / turbo-0.5-8 → 同一个 4step lora，仅步数不同
+# 步数直接写入 BasicScheduler.steps，MiniMaxH3SigmaShift 按步数重建 sigma 网格。
+# ---------------------------------------------------------------------------
+TURBO_FL2V_PRESETS: dict[str, dict[str, Any]] = {}
+if COMFYUI_TURBO_FL2V_8STEP_LORA:
+    _shift = _parse_shift(COMFYUI_TURBO_FL2V_8STEP_SHIFT, (12.0, 3.0))
+    TURBO_FL2V_PRESETS["turbo-0.5-6"] = {
+        "lora": COMFYUI_TURBO_FL2V_8STEP_LORA, "megapixels": 0.5, "steps": 6,
+        "shift_video": _shift[0], "shift_audio": _shift[1],
+    }
+    TURBO_FL2V_PRESETS["turbo-0.5-8"] = {
+        "lora": COMFYUI_TURBO_FL2V_8STEP_LORA, "megapixels": 0.5, "steps": 8,
+        "shift_video": _shift[0], "shift_audio": _shift[1],
+    }
+if COMFYUI_TURBO_FL2V_4STEP_LORA:
+    _shift = _parse_shift(COMFYUI_TURBO_FL2V_4STEP_SHIFT, (6.0, 3.0))
+    TURBO_FL2V_PRESETS["turbo-1.0-4"] = {
+        "lora": COMFYUI_TURBO_FL2V_4STEP_LORA, "megapixels": 1.0, "steps": 4,
+        "shift_video": _shift[0], "shift_audio": _shift[1],
+    }
+TURBO_REF2V_PRESETS: dict[str, dict[str, Any]] = {}
+if COMFYUI_TURBO_REF2V_4STEP_LORA:
+    _shift = _parse_shift(COMFYUI_TURBO_REF2V_4STEP_SHIFT, (12.0, 3.0))
+    for _steps in (4, 6, 8):
+        TURBO_REF2V_PRESETS[f"turbo-0.5-{_steps}"] = {
+            "lora": COMFYUI_TURBO_REF2V_4STEP_LORA, "megapixels": 0.5, "steps": _steps,
+            "shift_video": _shift[0], "shift_audio": _shift[1],
+        }
+
+
+def turbo_preset_ids(mode: str) -> list[str]:
+    """当前生成模式可用的 turbo 档位 id（按推荐顺序）。"""
+    presets = TURBO_REF2V_PRESETS if mode == "reference_to_video" else TURBO_FL2V_PRESETS
+    if mode == "reference_to_video":
+        return ["turbo-0.5-4", "turbo-0.5-6", "turbo-0.5-8"]
+    return ["turbo-0.5-6", "turbo-0.5-8", "turbo-1.0-4"]
+
+
+def resolve_turbo_preset(preset: str | None, mode: str) -> dict[str, Any] | None:
+    """把分辨率档位 id 解析为 turbo 工作流参数；普通档位（空值）返回 None。"""
+    if not preset:
+        return None
+    presets = TURBO_REF2V_PRESETS if mode == "reference_to_video" else TURBO_FL2V_PRESETS
+    return presets.get(preset)
+
+
+def nsfw_family(mode: str) -> str:
+    """NSFW 档位分组：多模态参考（ref2v）独一份，其余模式共用 fl2v 组。"""
+    return "ref2v" if mode == "reference_to_video" else "fl2v"
+
+
+def nsfw_presets(mode: str) -> list[dict[str, Any]]:
+    """当前生成模式可用的 NSFW LoRA 档位（配置顺序即前端下拉顺序）。"""
+    return NSFW_PRESETS.get(nsfw_family(mode), [])
+
+
+def nsfw_preset_ids(mode: str) -> list[str]:
+    return [preset["id"] for preset in nsfw_presets(mode)]
+
+
+# 特殊 NSFW 档位 id：选中原生 NSFW 基模（替换 UNETLoader 基模，不挂 LoRA），
+# 仅 fl2v 家族（文/首帧/尾帧/首尾帧）可用；与 NSFW LoRA 档位互斥。
+NSFW_NATIVE_PRESET_ID = "native"
+
+
+def nsfw_native_preset() -> dict[str, Any] | None:
+    if not COMFYUI_NSFW_NATIVE_ENABLED:
+        return None
+    return {"id": NSFW_NATIVE_PRESET_ID, "label": "原生基模", "native": True, "loras": []}
+
+
+def resolve_nsfw_preset(
+    preset_id: str | None, mode: str, nsfw: bool = True
+) -> dict[str, Any] | None:
+    """把任务参数解析为 NSFW 档位（含该档要叠加的 LoRA 列表）。
+
+    - nsfw 关闭 → None；
+    - 特殊档位 "native"（仅 fl2v 家族且已配置原生模型）→ 换基模档位，不挂 LoRA；
+    - 开启但未指定档位 → 回落该模式第一个 LoRA 档位（历史任务兼容）；
+    - 档位 id 不存在 → None（由接口层转成 400）。
+    """
+    if not nsfw:
+        return None
+    wanted = (preset_id or "").strip()
+    if wanted == NSFW_NATIVE_PRESET_ID:
+        if mode == "reference_to_video":
+            return None
+        return nsfw_native_preset()
+    presets = nsfw_presets(mode)
+    if not presets:
+        return None
+    if not wanted:
+        return presets[0]
+    return next((preset for preset in presets if preset["id"] == wanted), None)
+
+
+def task_nsfw_enabled(data: dict[str, Any]) -> bool:
+    """读取任务 NSFW 状态；历史记录（nsfw_native=true 或 nsfw_strength>0）统一回落为开启。"""
+    if bool(data.get("nsfw")):
+        return True
+    if bool(data.get("nsfw_native")):
+        return True
+    try:
+        return float(data.get("nsfw_strength", 0) or 0) > 0
+    except (TypeError, ValueError):
+        return False
 
 
 def _apply_spectrum(workflow: dict, loader_id: str, consumer_ids: list[str], enabled: bool) -> None:
@@ -648,36 +889,50 @@ def _apply_spectrum(workflow: dict, loader_id: str, consumer_ids: list[str], ena
         workflow[node_id]["inputs"]["model"] = [loader_id, 0]
 
 
-def _apply_nsfw_lora(workflow: dict, strength: float) -> None:
-    """NSFW 风格 Lora：仅在 fl2v 工作流（video_api.json）中生效。
+def _inject_nsfw_loras(
+    workflow: dict, source_id: str, loras: list[dict[str, Any]], first_node_id: int
+) -> str:
+    """按配置顺序串联 NSFW LoRA 链，返回链尾节点 id（无 LoRA 时返回原模型节点 id）。
 
-    强度 > 0 时在 UNETLoader(6) 与 Spectrum(150) 之间插入 LoraLoader 节点 151，
-    model 走 6→151→150，clip 走 13→151→104；强度为 0 或不配置 lora 时不插入节点，
-    避免加载 2GB 级 lora 文件，工作流保持原样。
+    接线：模型加载器 → Lora(first) → Lora(first+1) … → Spectrum / 调度器 / 引导器。
     """
-    if strength <= 0 or not COMFYUI_NSFW_LORA_ENABLED:
-        return
-    workflow["151"] = {
-        "class_type": "LoraLoader",
-        "inputs": {
-            "model": ["6", 0],
-            "clip": ["13", 0],
-            "lora_name": COMFYUI_NSFW_LORA_NAME,
-            "strength_model": strength,
-            "strength_clip": strength,
-        },
-    }
-    workflow["104"]["inputs"]["clip"] = ["151", 1]
+    loader_id = source_id
+    for offset, lora in enumerate(loras):
+        node_id = str(first_node_id + offset)
+        workflow[node_id] = {
+            "class_type": "LoraLoaderModelOnly",
+            "inputs": {
+                "lora_name": lora["name"],
+                "strength_model": lora["strength"],
+                "model": [loader_id, 0],
+            },
+        }
+        loader_id = node_id
+    return loader_id
 
 
 def _workflow(
     mode: str, prompt: str, width: int, height: int, duration: float, seed: int,
-    nsfw_strength: float = 0.0,
+    nsfw: bool = False, turbo: dict[str, Any] | None = None,
+    nsfw_preset: dict[str, Any] | None = None,
 ) -> dict:
+    # NSFW 档位 = 一组按序叠加的 LoRA，仅普通工作流生效；与 turbo 蒸馏 LoRA 互斥
+    # （两者叠加会互相破坏采样轨迹）。接口层已拒绝该组合，这里再兜底一次，
+    # 以防历史任务记录被手工改成两者同时开启。
+    loras: list[dict[str, Any]] = list((nsfw_preset or {}).get("loras") or []) if nsfw else []
+    # 原生基模档位（id=native，仅 fl2v 家族）不挂 LoRA，与 LoRA 档位二选一互斥。
+    native = bool((nsfw_preset or {}).get("native")) if nsfw else False
+    if native and loras:
+        raise ValueError("原生 NSFW 基模与 NSFW LoRA 档位不能同时使用")
+    if native and mode == "reference_to_video":
+        raise ValueError("多模态参考模式不支持原生 NSFW 基模")
+    if turbo and loras:
+        raise ValueError("NSFW LoRA 与 turbo 加速不能同时使用")
     if mode == "reference_to_video":
-        workflow = json.loads(
-            (Path(VIDEO_WORKFLOW_FOLDER) / "reference_video_api.json").read_text(encoding="utf-8")
-        )
+        # ref2v turbo：三个档位（0.5 的 4/6/8 step）共用同一个 4step 蒸馏 lora；
+        # turbo 工作流不挂 Spectrum。普通 ref2v 工作流的 NSFW 档位从节点 144 起串联。
+        name = "reference_video_turbo_api.json" if turbo else "reference_video_api.json"
+        workflow = json.loads((Path(VIDEO_WORKFLOW_FOLDER) / name).read_text(encoding="utf-8"))
         workflow["119"]["inputs"]["vae_name"] = COMFYUI_VIDEO_VAE
         workflow["120"]["inputs"]["vae_name"] = COMFYUI_AUDIO_VAE
         workflow["127"]["inputs"]["unet_name"] = COMFYUI_REF2VA_MODEL
@@ -686,16 +941,39 @@ def _workflow(
             {"prompt": prompt, "width": width, "height": height, "length": _frame_length(duration)}
         )
         workflow["129"]["inputs"]["noise_seed"] = seed
-        workflow["92"]["inputs"]["filename_prefix"] = f"video/minimax_h3_studio_ref_{uuid.uuid4().hex}"
-        _apply_spectrum(workflow, "127", ["124", "126"], COMFYUI_SPECTRUM_ENABLED)
+        prefix = "video/minimax_h3_studio_ref_turbo" if turbo else "video/minimax_h3_studio_ref"
+        workflow["92"]["inputs"]["filename_prefix"] = f"{prefix}_{uuid.uuid4().hex}"
+        if turbo:
+            workflow["143"]["inputs"]["lora_name"] = turbo["lora"]
+            workflow["142"]["inputs"].update(
+                {"shift_video": turbo["shift_video"], "shift_audio": turbo["shift_audio"]}
+            )
+            workflow["124"]["inputs"]["steps"] = turbo["steps"]
+        else:
+            # NSFW 档位串在基模与 Spectrum/调度器之间：UNET(127) → Lora(144…) → 150/124/126。
+            loader_id = _inject_nsfw_loras(workflow, "127", loras, 144)
+            _apply_spectrum(workflow, loader_id, ["124", "126"], COMFYUI_SPECTRUM_ENABLED)
         return workflow
-    # All modes share the same graph; unused optional image branches are removed.
-    workflow = json.loads((Path(VIDEO_WORKFLOW_FOLDER) / "video_api.json").read_text(encoding="utf-8"))
-    workflow["6"]["inputs"]["unet_name"] = COMFYUI_FL2VA_MODEL
-    # NSFW Lora 仅用于 fl2v 工作流；参考生成模式（reference_to_video）不加载。
-    _apply_nsfw_lora(workflow, nsfw_strength)
-    model_source = "151" if "151" in workflow else "6"
-    _apply_spectrum(workflow, model_source, ["9", "16"], COMFYUI_SPECTRUM_ENABLED)
+    # fl2v 家族（文/首帧/尾帧/首尾帧）共用一张图；未用到的可选图片分支在末尾裁剪。
+    name = "video_turbo_api.json" if turbo else "video_api.json"
+    workflow = json.loads((Path(VIDEO_WORKFLOW_FOLDER) / name).read_text(encoding="utf-8"))
+    # fl2v 基模：选中「原生基模」档位（native）时替换为原生 NSFW 模型，否则保持常规基模。
+    # 原生基模档位不挂 LoRA（与 NSFW LoRA 档位互斥），因此仍可与 turbo 蒸馏 lora 组合。
+    workflow["6"]["inputs"]["unet_name"] = (
+        COMFYUI_NSFW_NATIVE_MODEL if native else COMFYUI_FL2VA_MODEL
+    )
+    if turbo:
+        # turbo：UNET(6) → 蒸馏 Lora(122) → SigmaShift(123) → Scheduler/Guider；
+        # 步数直接写 steps，不跳步；不挂 Spectrum。
+        workflow["122"]["inputs"]["lora_name"] = turbo["lora"]
+        workflow["123"]["inputs"].update(
+            {"shift_video": turbo["shift_video"], "shift_audio": turbo["shift_audio"]}
+        )
+        workflow["9"]["inputs"]["steps"] = turbo["steps"]
+    else:
+        # NSFW 档位串在基模与 Spectrum/调度器之间：UNET(6) → Lora(151…) → 150/9/16。
+        loader_id = _inject_nsfw_loras(workflow, "6", loras, 151)
+        _apply_spectrum(workflow, loader_id, ["9", "16"], COMFYUI_SPECTRUM_ENABLED)
     workflow["11"]["inputs"]["vae_name"] = COMFYUI_VIDEO_VAE
     workflow["13"]["inputs"]["clip_name"] = COMFYUI_TEXT_ENCODER
     workflow["24"]["inputs"]["vae_name"] = COMFYUI_AUDIO_VAE
@@ -703,7 +981,8 @@ def _workflow(
         {"prompt": prompt, "width": width, "height": height, "length": _frame_length(duration)}
     )
     workflow["15"]["inputs"]["noise_seed"] = seed
-    workflow["92"]["inputs"]["filename_prefix"] = f"video/minimax_h3_studio_{uuid.uuid4().hex}"
+    prefix = "video/minimax_h3_studio_turbo" if turbo else "video/minimax_h3_studio"
+    workflow["92"]["inputs"]["filename_prefix"] = f"{prefix}_{uuid.uuid4().hex}"
     for node_id in ("3", "4"):
         workflow[node_id]["inputs"].update(width=width, height=height)
     if mode not in {"first_frame", "first_last_frame"}:
@@ -796,7 +1075,7 @@ async def _polish_then_generate(task_id: str) -> None:
     try:
         data = load_metadata(task_id)
         original_prompt = data.get("original_prompt") or data["prompt"]
-        nsfw_strength = float(data.get("nsfw_strength", 0.0) or 0.0)
+        nsfw = task_nsfw_enabled(data)
         if data["mode"] == "reference_to_video":
             grouped = {"image": [], "video": [], "audio": []}
             for item in data.get("_reference_assets", []):
@@ -809,7 +1088,7 @@ async def _polish_then_generate(task_id: str) -> None:
                 [path for _, path in sorted(grouped["video"])],
                 [path for _, path in sorted(grouped["audio"])],
                 data.get("use_video_audio", True),
-                nsfw_strength,
+                nsfw,
             )
         else:
             images = [
@@ -818,7 +1097,7 @@ async def _polish_then_generate(task_id: str) -> None:
                 if name in data.get("_assets", {})
             ]
             polished = await asyncio.to_thread(
-                polish_prompt, original_prompt, data["mode"], data["duration"], images, nsfw_strength
+                polish_prompt, original_prompt, data["mode"], data["duration"], images, nsfw,
             )
         data = load_metadata(task_id)
         data.update(
@@ -826,6 +1105,8 @@ async def _polish_then_generate(task_id: str) -> None:
             polished_prompt=polished,
             original_prompt=original_prompt,
             status="preparing",
+            # 润色环节保持 0%：进度条从 0 起步，10% 为解析完成，采样 10%→90%。
+            progress=data.get("progress", 0),
             current_stage="提示词润色完成，正在准备工作流",
         )
         _save_metadata(data)
@@ -843,19 +1124,34 @@ async def _run_generation(task_id: str) -> None:
         data = load_metadata(task_id)
         workflow = _workflow(
             data["mode"], data["prompt"], data["width"], data["height"], data["duration"], data["seed"],
-            data.get("nsfw_strength", 0.0),
+            nsfw=task_nsfw_enabled(data),
+            nsfw_preset=resolve_nsfw_preset(
+                data.get("nsfw_preset"), data["mode"], task_nsfw_enabled(data)
+            ),
+            turbo=resolve_turbo_preset(data.get("resolution_preset"), data["mode"]),
         )
         if data["mode"] == "reference_to_video":
             workflow["136"]["inputs"]["ref_image_size"] = data.get("ref_image_size", "match")
             for item in data.get("_reference_assets", []):
                 source = Path(item["path"])
+                upload_source = source
                 if item["kind"] == "image":
                     source = _downscale_image(source, H3_IMAGE_MAX_SIDE)
+                    upload_source = source
+                elif item["kind"] == "video" and FFMPEG_PATH:
+                    # 配置了 ffmpeg：参考视频先压缩到与输出分辨率一致的大小和帧率再上传，
+                    # 仍保持视频格式；压缩失败时回退为上传原视频。
+                    target_fps = _frame_length(data["duration"]) / data["duration"]
+                    compressed = _resize_reference_video(
+                        source, data["width"], data["height"], target_fps
+                    )
+                    if compressed:
+                        upload_source = compressed
                 try:
-                    remote_name = await asyncio.to_thread(client.upload_file, source)
+                    remote_name = await asyncio.to_thread(client.upload_file, upload_source)
                 finally:
-                    if source != Path(item["path"]):
-                        source.unlink(missing_ok=True)
+                    if upload_source != Path(item["path"]):
+                        upload_source.unlink(missing_ok=True)
                 index = int(item["index"]) - 1
                 kind = item["kind"]
                 if kind == "image":
@@ -900,7 +1196,8 @@ async def _run_generation(task_id: str) -> None:
             data = load_metadata(task_id)
             data.update(
                 status="queued",
-                progress=0,
+                # 保留已有进度，避免入队瞬间进度回退。
+                progress=data["progress"],
                 current_stage="已进入生成队列",
                 _comfy_prompt_id=submitted["prompt_id"],
                 # 记录提交使用的 client_id，服务重启后可用同一 id 重连 websocket 恢复实时进度
@@ -929,20 +1226,49 @@ async def _watch_websocket(task_id: str, prompt_id: str, websocket, client: Comf
             if kind == "execution_start":
                 data.update(status="running", progress=max(data["progress"], 2), queue_position=0, current_stage="开始生成")
             elif kind == "executing" and payload.get("node"):
-                data.update(status="running", queue_position=0, current_stage=NODE_STAGES.get(str(payload["node"]), "正在准备生成资源"))
+                node = str(payload["node"])
+                # 解析阶段完成即到 10%：解析提示词与参考帧(104)、多模态参考(136)、
+                # 应用采样加速(150) 都在 10% 汇合；之后采样 progress 事件从 10% 起步推进到 90%。
+                stage_base = {"104": 10, "136": 10, "150": 10}.get(node)
+                # 采样完成后的收尾阶段（解码/封装/保存）从 90% 继续推进到 98%，避免进度条长时间停滞。
+                tail_base = {"10": 92, "23": 94, "91": 96, "92": 98}.get(node)
+                base = stage_base if stage_base is not None else tail_base
+                progress = data["progress"] if base is None else max(data["progress"], base)
+                data.update(
+                    status="running",
+                    progress=progress,
+                    queue_position=0,
+                    current_stage=NODE_STAGES.get(node, "正在准备生成资源"),
+                )
             elif kind == "progress" and payload.get("max"):
-                value = float(payload.get("value", 0)) / float(payload["max"])
-                data.update(status="running", progress=min(98, max(data["progress"], round(value * 95, 1))), current_stage="正在采样生成")
+                step_value = int(payload.get("value", 0))
+                step_max = int(payload["max"])
+                value = step_value / step_max if step_max else 0.0
+                # 采样过程映射到 10%–90% 的进度条范围：开始采样即 10%，采样完成到 90%，
+                # 随后的解码/封装/保存阶段由 executing 事件继续推进到 98%，任务完成跳 100%。
+                # 环节文案直接显示采样自身的百分比（0-100%），如「正在采样生成（42%）」。
+                data.update(
+                    status="running",
+                    progress=min(90, max(data["progress"], round(10 + value * 80, 1))),
+                    current_stage=f"正在采样生成（{round(value * 100)}%）",
+                )
             elif kind == "execution_error":
                 raise RuntimeError("视频生成任务执行失败")
             _save_metadata(data)
+            # 收到执行完成信号（executing node=null / execution_success / execution_cached）后立即收尾。
+            # 不在每个事件之间轮询 history，避免 HTTP 查询拖慢实时进度事件的处理。
+            if (kind == "executing" and not payload.get("node")) or kind in ("execution_success", "execution_cached"):
+                history = await asyncio.to_thread(client.history, prompt_id)
+                if prompt_id in history:
+                    await _complete_from_history(task_id, history[prompt_id], client)
+                    return
         except asyncio.TimeoutError:
+            # 无实时事件才兜底：刷新排队位置并检测任务完成（正常事件流不做 HTTP 轮询）。
             await _update_queue_position(task_id, prompt_id, client)
-
-        history = await asyncio.to_thread(client.history, prompt_id)
-        if prompt_id in history:
-            await _complete_from_history(task_id, history[prompt_id], client)
-            return
+            history = await asyncio.to_thread(client.history, prompt_id)
+            if prompt_id in history:
+                await _complete_from_history(task_id, history[prompt_id], client)
+                return
 
 
 async def _update_queue_position(task_id: str, prompt_id: str, client: ComfyClient) -> None:
@@ -951,7 +1277,9 @@ async def _update_queue_position(task_id: str, prompt_id: str, client: ComfyClie
     running_ids = [_queue_prompt_id(item) for item in queue.get("queue_running", [])]
     data = load_metadata(task_id)
     if prompt_id in running_ids:
-        data.update(status="running", queue_position=0, progress=max(data["progress"], 2), current_stage="正在生成")
+        # 任务在运行：仅推进进度，不覆盖 websocket 事件已设置的具体阶段
+        # （H3 单步采样耗时长，progress 事件间隔可能超过 websocket 超时，不能回退成笼统的「正在生成」）。
+        data.update(status="running", queue_position=0, progress=max(data["progress"], 2))
     elif prompt_id in pending_ids:
         data.update(status="queued", queue_position=pending_ids.index(prompt_id) + 1, current_stage="等待生成资源")
     _save_metadata(data)
@@ -1114,10 +1442,8 @@ async def _resume_monitor(task_id: str, prompt_id: str) -> None:
         data = load_metadata(task_id)
         if prompt_id in running_ids:
             missing = 0
-            data.update(
-                status="running", queue_position=0,
-                progress=max(data["progress"], 2), current_stage="正在生成",
-            )
+            # 仅推进进度，不覆盖已有具体阶段（同上，避免回退成笼统的「正在生成」）。
+            data.update(status="running", queue_position=0, progress=max(data["progress"], 2))
         elif prompt_id in pending_ids:
             missing = 0
             data.update(

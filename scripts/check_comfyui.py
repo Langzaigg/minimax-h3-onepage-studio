@@ -11,11 +11,17 @@ from config import (
     COMFYUI_AUDIO_VAE,
     COMFYUI_BASE_URL,
     COMFYUI_FL2VA_MODEL,
+    COMFYUI_NSFW_NATIVE_ENABLED,
+    COMFYUI_NSFW_NATIVE_MODEL,
     COMFYUI_REF2VA_MODEL,
     COMFYUI_SPECTRUM_ENABLED,
     COMFYUI_TEXT_ENCODER,
     COMFYUI_TIMEOUT,
+    COMFYUI_TURBO_FL2V_4STEP_LORA,
+    COMFYUI_TURBO_FL2V_8STEP_LORA,
+    COMFYUI_TURBO_REF2V_4STEP_LORA,
     COMFYUI_VIDEO_VAE,
+    NSFW_PRESETS,
 )
 
 
@@ -30,9 +36,28 @@ REQUIRED_NODES = {
     "CreateVideo",
     "SaveVideo",
 }
-# 采样加速节点仅在 comfyui.spectrum_apply.enabled=true 时才被工作流引用。
+# 采样加速节点仅在 comfyui.spectrum_apply.enabled=true 时才被工作流引用（turbo 工作流不用）。
 if COMFYUI_SPECTRUM_ENABLED:
     REQUIRED_NODES.add("SpectrumApplyMiniMaxH3")
+# turbo 蒸馏工作流（lightx2v lora）需要 SigmaShift 与 LoraLoader 节点。
+TURBO_LORAS = [
+    lora for lora in (
+        COMFYUI_TURBO_FL2V_8STEP_LORA,
+        COMFYUI_TURBO_FL2V_4STEP_LORA,
+        COMFYUI_TURBO_REF2V_4STEP_LORA,
+    ) if lora
+]
+if TURBO_LORAS:
+    REQUIRED_NODES.update({"MiniMaxH3SigmaShift", "LoraLoaderModelOnly"})
+# NSFW 档位（fl2v / ref2v 各组）走 LoraLoaderModelOnly，仅普通工作流生效（与 turbo 互斥）。
+NSFW_LORAS = {
+    lora["name"]
+    for presets in NSFW_PRESETS.values()
+    for preset in presets
+    for lora in preset["loras"]
+}
+if NSFW_LORAS:
+    REQUIRED_NODES.add("LoraLoaderModelOnly")
 REQUIRED_MODELS = {
     "diffusion_models": {
         COMFYUI_FL2VA_MODEL,
@@ -44,6 +69,11 @@ REQUIRED_MODELS = {
         COMFYUI_AUDIO_VAE,
     },
 }
+# Lora 位于 ComfyUI models/loras 目录：turbo 蒸馏 lora 与全部 NSFW 档位 lora。
+REQUIRED_MODELS["loras"] = set(TURBO_LORAS) | NSFW_LORAS
+# 原生 NSFW 基模：作为 fl2v 家族 NSFW 档位（替换 UNETLoader 基模），与常规模型同在 diffusion_models。
+if COMFYUI_NSFW_NATIVE_ENABLED:
+    REQUIRED_MODELS["diffusion_models"].add(COMFYUI_NSFW_NATIVE_MODEL)
 
 
 def get_json(session: requests.Session, path: str):
