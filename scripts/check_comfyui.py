@@ -11,8 +11,8 @@ from config import (
     COMFYUI_AUDIO_VAE,
     COMFYUI_BASE_URL,
     COMFYUI_FL2VA_MODEL,
-    COMFYUI_NSFW_NATIVE_ENABLED,
-    COMFYUI_NSFW_NATIVE_MODEL,
+    COMFYUI_HYBRID_MODEL,
+    COMFYUI_HYBRID_TURBO_MODEL,
     COMFYUI_REF2VA_MODEL,
     COMFYUI_SPECTRUM_ENABLED,
     COMFYUI_TEXT_ENCODER,
@@ -71,9 +71,18 @@ REQUIRED_MODELS = {
 }
 # Lora 位于 ComfyUI models/loras 目录：turbo 蒸馏 lora 与全部 NSFW 档位 lora。
 REQUIRED_MODELS["loras"] = set(TURBO_LORAS) | NSFW_LORAS
-# 原生 NSFW 基模：作为 fl2v 家族 NSFW 档位（替换 UNETLoader 基模），与常规模型同在 diffusion_models。
-if COMFYUI_NSFW_NATIVE_ENABLED:
-    REQUIRED_MODELS["diffusion_models"].add(COMFYUI_NSFW_NATIVE_MODEL)
+# 混合生成基模（Dasiwa Hybrid）：普通档 Non-Distilled（25 步）与 turbo Distilled 各一个，
+# 与常规模型同在 diffusion_models；配置了哪个就校验哪个。
+if COMFYUI_HYBRID_MODEL:
+    REQUIRED_MODELS["diffusion_models"].add(COMFYUI_HYBRID_MODEL)
+if COMFYUI_HYBRID_TURBO_MODEL:
+    REQUIRED_MODELS["diffusion_models"].add(COMFYUI_HYBRID_TURBO_MODEL)
+# 混合模式普通档（25 步）工作流串联 Spectrum 加速节点（与 fl2v 普通工作流一致）。
+if COMFYUI_HYBRID_MODEL and COMFYUI_SPECTRUM_ENABLED:
+    REQUIRED_NODES.add("SpectrumApplyMiniMaxH3")
+# 混合模式 turbo 工作流需要 SigmaShift 节点（蒸馏档位重建 sigma 网格）。
+if COMFYUI_HYBRID_TURBO_MODEL:
+    REQUIRED_NODES.add("MiniMaxH3SigmaShift")
 
 
 def get_json(session: requests.Session, path: str):

@@ -16,7 +16,7 @@ from config import (
 from routers.video import _create_video_task_impl, derive_mode, dimensions, resolve_aspect_ratio
 from services import storage_maintenance
 from services import video_generation
-from services.video_generation import _frame_length, _workflow, public_task, video_output_filename
+from services.video_generation import _frame_length, _hybrid_keyframe_chain, _workflow, public_task, video_output_filename
 import services.video_generation as video_generation_service
 
 
@@ -205,8 +205,6 @@ def test_nsfw_and_turbo_are_mutually_exclusive(monkeypatch):
 def test_resolve_nsfw_rejects_unknown_or_missing_presets(monkeypatch):
     from routers.video import resolve_nsfw
 
-    monkeypatch.setattr(video_generation, "COMFYUI_NSFW_NATIVE_ENABLED", False)
-    monkeypatch.setattr(video_generation, "COMFYUI_NSFW_NATIVE_MODEL", "")
     _use_nsfw_presets(monkeypatch)
     # 关闭 → None；未指定档位 → 回落第一个档位。
     assert resolve_nsfw(False, "", "text_to_video") is None
@@ -222,80 +220,138 @@ def test_resolve_nsfw_rejects_unknown_or_missing_presets(monkeypatch):
         resolve_nsfw(True, "", "reference_to_video")
 
 
-def test_nsfw_native_preset_swaps_fl2v_base_model(monkeypatch):
-    native_model = "PinkCherry_MiniMax_H3_pruned_int8_convrot-beta-0.6.safetensors"
-    monkeypatch.setattr(video_generation, "COMFYUI_NSFW_NATIVE_MODEL", native_model)
-    monkeypatch.setattr(video_generation, "COMFYUI_NSFW_NATIVE_ENABLED", True)
+def test_hybrid_workflow_20step_with_spectrum(monkeypatch):
+    """混合模式（Dasiwa Hybrid）20 步版：UNET → SigmaShift → Spectrum → 调度器/引导器。"""
+    monkeypatch.setattr(video_generation, "COMFYUI_HYBRID_MODEL", "DasiwaMinimaxH3_dasiwaHybridV1.safetensors")
+    workflow = _workflow("hybrid_to_video", "prompt", 608, 352, 5, 123)
+    assert workflow["6"]["inputs"]["unet_name"] == "DasiwaMinimaxH3_dasiwaHybridV1.safetensors"
+    # 采样链：UNET(6) → SigmaShift(123) → Spectrum(150) → 调度器/引导器。
+    assert workflow["123"]["inputs"]["model"] == ["6", 0]
+    assert workflow["150"]["inputs"]["model"] == ["123", 0]
+    assert workflow["9"]["inputs"]["model"] == ["150", 0]
+    assert workflow["16"]["inputs"]["model"] == ["150", 0]
+    assert workflow["9"]["inputs"]["steps"] == video_generation.HYBRID_STEPS
+    assert workflow["9"]["inputs"]["scheduler"] == video_generation.HYBRID_SCHEDULER
+    assert workflow["17"]["inputs"]["sampler_name"] == video_generation.HYBRID_SAMPLER
+    assert workflow["123"]["inputs"]["shift_video"] == video_generation.HYBRID_SHIFT_VIDEO
+    assert workflow["123"]["inputs"]["shift_audio"] == video_generation.HYBRID_SHIFT_AUDIO
+    # 双 conditioning 节点（104/136）都保留，运行时二选一。
+    assert workflow["104"]["class_type"] == "MiniMaxH3ImageToVideo"
+    assert workflow["136"]["class_type"] == "MiniMaxH3ReferenceToVideo"
+    assert workflow["104"]["inputs"]["prompt"] == "prompt"
+    assert workflow["136"]["inputs"]["prompt"] == "prompt"
+
+
+def test_hybrid_turbo_workflow_direct_steps_without_spectrum(monkeypatch):
+    """混合模式 turbo 加速（可选开关）：蒸馏基模固定 8 步直接采样，不挂 Spectrum。"""
+    monkeypatch.setattr(video_generation, "COMFYUI_HYBRID_TURBO_MODEL", "DasiwaMinimaxH3_dasiwaHybrid8turboV1.safetensors")
+    assert video_generation.turbo_preset_ids("hybrid_to_video") == ["hybrid-turbo-8"]
+    turbo = video_generation.resolve_turbo_preset("hybrid-turbo-8", "hybrid_to_video")
+    assert turbo is not None
+    assert turbo["steps"] == video_generation.HYBRID_TURBO_STEPS == 8
+    workflow = _workflow("hybrid_to_video", "prompt", 960, 544, 5, 1, turbo=turbo)
+    assert workflow["6"]["inputs"]["unet_name"] == "DasiwaMinimaxH3_dasiwaHybrid8turboV1.safetensors"
+    assert workflow["9"]["inputs"]["steps"] == 8
+    assert workflow["9"]["inputs"]["scheduler"] == video_generation.HYBRID_TURBO_SCHEDULER
+    assert workflow["17"]["inputs"]["sampler_name"] == video_generation.HYBRID_TURBO_SAMPLER
+    assert workflow["9"]["inputs"]["model"] == ["123", 0]
+    assert workflow["16"]["inputs"]["model"] == ["123", 0]
+    assert workflow["123"]["inputs"]["model"] == ["6", 0]
+    assert workflow["123"]["inputs"]["shift_video"] == video_generation.HYBRID_TURBO_SHIFT_VIDEO
+    assert workflow["123"]["inputs"]["shift_audio"] == video_generation.HYBRID_TURBO_SHIFT_AUDIO
+    # turbo 版不挂 Spectrum 加速节点。
+    assert "150" not in workflow
+    # hybrid 模式不支持 4 步档位，也不支持 fl2v/ref2v 的 turbo 档位。
+    assert video_generation.resolve_turbo_preset("hybrid-turbo-4", "hybrid_to_video") is None
+    assert video_generation.resolve_turbo_preset("turbo-0.5-6", "hybrid_to_video") is None
+
+
+def test_hybrid_nsfw_not_applied_to_workflow(monkeypatch):
+    """混合模式不叠加 NSFW LoRA（Dasiwa 基模自带能力）：传 nsfw 档位也不会改变工作流。"""
     _use_nsfw_presets(monkeypatch)
-
-    # 原生基模档位：替换 UNETLoader 6 基模，不挂任何 LoRA 节点。
-    preset = video_generation.resolve_nsfw_preset("native", "text_to_video")
-    assert preset["native"] is True and preset["loras"] == []
-    workflow = _workflow("text_to_video", "prompt", 608, 352, 5, 1, nsfw=True, nsfw_preset=preset)
-    assert workflow["6"]["inputs"]["unet_name"] == native_model
-    assert "151" not in workflow
-    assert workflow["150"]["inputs"]["model"] == ["6", 0]
-
-    # 原生基模不挂 LoRA，可与 turbo 组合（蒸馏 lora 直接作用于原生基模）。
-    turbo = video_generation.resolve_turbo_preset("turbo-0.5-6", "text_to_video")
-    native_turbo = _workflow(
-        "text_to_video", "prompt", 960, 544, 5, 1, nsfw=True, turbo=turbo, nsfw_preset=preset
-    )
-    assert native_turbo["6"]["inputs"]["unet_name"] == native_model
-    assert native_turbo["122"]["inputs"]["lora_name"] == COMFYUI_TURBO_FL2V_8STEP_LORA
-
-    # LoRA 档位保持常规基模（互斥的另一侧）。
-    lora_workflow = _workflow(
-        "text_to_video", "prompt", 608, 352, 5, 1, nsfw=True,
+    monkeypatch.setattr(video_generation, "COMFYUI_HYBRID_MODEL", "hybrid.safetensors")
+    workflow = _workflow(
+        "hybrid_to_video", "prompt", 608, 352, 5, 1, nsfw=True,
         nsfw_preset=video_generation.resolve_nsfw_preset("aio", "text_to_video"),
     )
-    assert lora_workflow["6"]["inputs"]["unet_name"] == video_generation.COMFYUI_FL2VA_MODEL
-    assert "151" in lora_workflow
-
-    # ref2v 不支持原生基模档位。
-    assert video_generation.resolve_nsfw_preset("native", "reference_to_video") is None
+    assert workflow["6"]["inputs"]["unet_name"] == "hybrid.safetensors"
+    assert "151" not in workflow and "152" not in workflow
+    assert workflow["150"]["inputs"]["model"] == ["123", 0]
 
 
-def test_nsfw_native_and_lora_cannot_be_combined(monkeypatch):
-    monkeypatch.setattr(video_generation, "COMFYUI_NSFW_NATIVE_MODEL", "native.safetensors")
-    monkeypatch.setattr(video_generation, "COMFYUI_NSFW_NATIVE_ENABLED", True)
-    _use_nsfw_presets(monkeypatch)
-    malformed = {"id": "native", "native": True, "loras": [{"name": FL2V_AIO_LORA, "strength": 1.0}]}
-    with pytest.raises(ValueError):
-        _workflow("text_to_video", "prompt", 608, 352, 5, 1, nsfw=True, nsfw_preset=malformed)
+def test_hybrid_keyframe_chain_variants():
+    """混合参考：首/末帧经官方 MiniMaxH3AddGuide 锚定为关键帧，与 136 的 refs 共存。"""
+    frame_count = _frame_length(5)  # 124
+    # 首尾帧都有：160(首帧) → 161(末帧) → BasicGuider。
+    workflow = {"1": {}, "2": {}, "136": {}}
+    chain = _hybrid_keyframe_chain(workflow, frame_count, True, True)
+    assert chain == ["161", 0]
+    assert workflow["160"]["class_type"] == "MiniMaxH3AddGuide"
+    assert workflow["160"]["inputs"] == {
+        "positive": ["136", 0], "vae": ["11", 0], "latent": ["136", 1],
+        "image": ["1", 0], "frame_idx": 0,
+    }
+    assert workflow["161"]["inputs"]["positive"] == ["160", 0]
+    assert workflow["161"]["inputs"]["image"] == ["2", 0]
+    assert workflow["161"]["inputs"]["frame_idx"] == frame_count - 1
+    # 仅首帧：只保留 160，末帧 LoadImage 节点被裁剪。
+    workflow = {"1": {}, "2": {}, "136": {}}
+    chain = _hybrid_keyframe_chain(workflow, frame_count, True, False)
+    assert chain == ["160", 0]
+    assert "161" not in workflow and "2" not in workflow
+    # 无关键帧：136 直连引导器，两个 LoadImage 都裁剪。
+    workflow = {"1": {}, "2": {}, "136": {}}
+    chain = _hybrid_keyframe_chain(workflow, frame_count, False, False)
+    assert chain == ["136", 0]
+    assert "160" not in workflow and "161" not in workflow
+    assert "1" not in workflow and "2" not in workflow
 
 
-def test_resolve_nsfw_native_only_when_configured(monkeypatch):
+def test_hybrid_20step_workflow_mixed_reference_with_keyframes(monkeypatch):
+    """混合模式 20 步版 + 参考素材 + 首尾帧：104/3/4 裁剪，采样链接 136+AddGuide。"""
+    monkeypatch.setattr(video_generation, "COMFYUI_HYBRID_MODEL", "hybrid.safetensors")
+    workflow = _workflow("hybrid_to_video", "prompt", 608, 352, 5, 7)
+    # 有参考素材（含关键帧）：移除 104 与 ImageScale(3/4)，latent 改接 136。
+    workflow.pop("104", None)
+    workflow.pop("3", None)
+    workflow.pop("4", None)
+    workflow["14"]["inputs"]["latent_image"] = ["136", 1]
+    workflow["16"]["inputs"]["conditioning"] = _hybrid_keyframe_chain(
+        workflow, _frame_length(5), True, True
+    )
+    assert workflow["16"]["inputs"]["conditioning"] == ["161", 0]
+    assert workflow["14"]["inputs"]["latent_image"] == ["136", 1]
+    assert workflow["160"]["inputs"]["positive"] == ["136", 0]
+    assert workflow["161"]["inputs"]["positive"] == ["160", 0]
+    assert workflow["161"]["inputs"]["frame_idx"] == _frame_length(5) - 1
+    # 采样链不受影响：UNET → SigmaShift → Spectrum → 调度器/引导器。
+    assert workflow["9"]["inputs"]["model"] == ["150", 0]
+    assert workflow["16"]["inputs"]["model"] == ["150", 0]
+
+
+def test_resolve_nsfw_has_no_native_preset(monkeypatch):
     from routers.video import resolve_nsfw
 
     _use_nsfw_presets(monkeypatch)
-    monkeypatch.setattr(video_generation, "COMFYUI_NSFW_NATIVE_ENABLED", False)
-    monkeypatch.setattr(video_generation, "COMFYUI_NSFW_NATIVE_MODEL", "")
-    # 未配置原生基模：native 档位不可用（400）。
+    # 原生基模档位已移除：任何模式都不存在 native 档位。
     with pytest.raises(HTTPException):
         resolve_nsfw(True, "native", "text_to_video")
-    monkeypatch.setattr(video_generation, "COMFYUI_NSFW_NATIVE_ENABLED", True)
-    monkeypatch.setattr(video_generation, "COMFYUI_NSFW_NATIVE_MODEL", "native.safetensors")
-    assert resolve_nsfw(True, "native", "text_to_video")["native"] is True
-    # ref2v 永远没有 native 档位。
     with pytest.raises(HTTPException):
         resolve_nsfw(True, "native", "reference_to_video")
 
 
 def test_frontend_config_exposes_nsfw_presets(monkeypatch):
     monkeypatch.setattr(main, "NSFW_PRESETS", SAMPLE_NSFW_PRESETS)
-    monkeypatch.setattr(main, "COMFYUI_NSFW_NATIVE_ENABLED", False)
     config = asyncio.run(main.frontend_config())
     assert config["nsfw_presets"]["fl2v"] == [
         {"id": "aio", "label": "AIO 1.0"},
         {"id": "aio-vagina", "label": "AIO 0.65 + Vagina 0.35"},
     ]
     assert config["nsfw_presets"]["ref2v"] == [{"id": "aftermidnight", "label": "AfterMidnight 1.0"}]
-    # 配置了原生基模时，fl2v 末尾追加 native 档位（ref2v 不追加）。
-    monkeypatch.setattr(main, "COMFYUI_NSFW_NATIVE_ENABLED", True)
-    with_native = asyncio.run(main.frontend_config())["nsfw_presets"]
-    assert with_native["fl2v"][-1] == {"id": "native", "label": "原生基模", "native": True}
-    assert all(item.get("id") != "native" for item in with_native["ref2v"])
+    assert all(item.get("id") != "native" for item in config["nsfw_presets"]["fl2v"])
+    # 混合模式 turbo 档位暴露给前端渲染分辨率下拉。
+    assert config["turbo_presets"]["hybrid"] == video_generation.turbo_preset_ids("hybrid_to_video")
+    assert "hybrid_enabled" in config and "hybrid_turbo_enabled" in config
 
 
 def test_turbo_presets_and_resolution_resolution():
@@ -339,6 +395,45 @@ def test_turbo_presets_and_resolution_resolution():
         resolve_resolution("turbo-0.5-4", 0.4, "text_to_video")
     with pytest.raises(HTTPException):
         resolve_resolution("turbo-9.9-9", 0.4, "text_to_video")
+
+
+def test_hybrid_turbo_keeps_requested_resolution(monkeypatch):
+    """混合模式 turbo 加速不锁定分辨率：有效 MP 直接采用请求值。"""
+    from routers.video import resolve_resolution
+
+    monkeypatch.setattr(
+        video_generation, "COMFYUI_HYBRID_TURBO_MODEL",
+        "DasiwaMinimaxH3_dasiwaHybrid8turboV1.safetensors",
+    )
+    preset_id = video_generation.turbo_preset_ids("hybrid_to_video")[0]
+    megapixels, preset, turbo = resolve_resolution(preset_id, 0.8, "hybrid_to_video")
+    assert (megapixels, preset) == (0.8, preset_id)
+    assert turbo["steps"] == video_generation.HYBRID_TURBO_STEPS == 8
+    assert "megapixels" not in turbo
+
+
+def test_hybrid_polish_system_is_self_contained(monkeypatch):
+    """混合模式专属润色提示词：混合参考理解/动漫偏向独立成文；
+    破甲与 NSFW 风格指南按全局 llm.nsfw_armor 开关以拼接方式追加。"""
+    system = video_generation._hybrid_polish_system("GUIDE-TEXT")
+    for marker in (
+        "MIXED-REFERENCE UNDERSTANDING",
+        "ANIME-LEANING ART DIRECTION",
+        "PROMPT GUIDE:\nGUIDE-TEXT",
+    ):
+        assert marker in system
+    # 开关关闭：不注入破甲与风格指南。
+    monkeypatch.setattr(video_generation, "LLM_NSFW_ARMOR", False)
+    without = video_generation._hybrid_polish_system("G")
+    assert video_generation._NSFW_ARMOR_TEXT not in without
+    assert video_generation._NSFW_GUIDE_TEXT not in without
+    # 开关开启：拼接破甲与风格指南；有参考素材时要求六段式输出。
+    monkeypatch.setattr(video_generation, "LLM_NSFW_ARMOR", True)
+    ref_system = video_generation._hybrid_polish_system("G", ref_mode=True)
+    assert video_generation._NSFW_ARMOR_TEXT.strip() in ref_system
+    assert video_generation._NSFW_GUIDE_TEXT.strip() in ref_system
+    assert "six English sections" in ref_system
+    assert "without section headers" in system
 
 
 def test_turbo_fl2v_workflow_direct_steps_without_skipping(monkeypatch):
@@ -477,7 +572,7 @@ def test_terminal_task_delete_and_retention_cleanup(tmp_path, monkeypatch):
 
 def test_generation_openapi_uses_one_endpoint_per_workflow_with_optional_polish():
     schema = main.app.openapi()
-    for path in ("/api/video/tasks", "/api/video/reference-tasks"):
+    for path in ("/api/video/tasks", "/api/video/reference-tasks", "/api/video/hybrid-tasks"):
         operation = schema["paths"][path]["post"]
         body_ref = operation["requestBody"]["content"]["multipart/form-data"]["schema"]["$ref"]
         body = schema["components"]["schemas"][body_ref.rsplit("/", 1)[-1]]
@@ -494,6 +589,12 @@ def test_generation_openapi_uses_one_endpoint_per_workflow_with_optional_polish(
     reference_body_ref = reference_operation["requestBody"]["content"]["multipart/form-data"]["schema"]["$ref"]
     reference_body = schema["components"]["schemas"][reference_body_ref.rsplit("/", 1)[-1]]
     assert reference_body["properties"]["aspect_ratio"]["default"] == "auto"
+    # 混合模式端点同时接受首尾帧与参考素材。
+    hybrid_operation = schema["paths"]["/api/video/hybrid-tasks"]["post"]
+    hybrid_body_ref = hybrid_operation["requestBody"]["content"]["multipart/form-data"]["schema"]["$ref"]
+    hybrid_body = schema["components"]["schemas"][hybrid_body_ref.rsplit("/", 1)[-1]]
+    for prop_name in ("first_frame", "last_frame", "reference_images", "reference_videos", "reference_audios"):
+        assert prop_name in hybrid_body["properties"]
 
 
 def test_same_generation_implementation_switches_direct_or_polish_first(tmp_path, monkeypatch):
@@ -610,3 +711,58 @@ def test_polish_reference_prompt_feeds_480p_gif_for_video_reference(tmp_path, mo
     assert gif_parts, "参考视频应转成 480p GIF 喂给润色模型"
     assert "Animated GIF overview of <Video 1>" in json.dumps(content, ensure_ascii=False)
     assert not any("Representative frame" in str(part.get("text", "")) for part in content)
+
+
+def test_cleanup_comfyui_uploads_removes_recorded_copies(tmp_path, monkeypatch):
+    """配置 input_dir 后，上传到 ComfyUI input 的临时副本在生成结束时应被删除。"""
+    monkeypatch.setattr(video_generation, "COMFYUI_INPUT_DIR", str(tmp_path / "input"))
+    input_root = tmp_path / "input"
+    input_root.mkdir()
+    (input_root / "minimax_h3_studio_a.jpg").write_bytes(b"first")
+    (input_root / "minimax_h3_studio_b.png").write_bytes(b"ref")
+    subfolder = input_root / "sub"
+    subfolder.mkdir()
+    (subfolder / "minimax_h3_studio_c.jpg").write_bytes(b"video")
+
+    client = video_generation.ComfyClient()
+    client.uploaded_files = [
+        "minimax_h3_studio_a.jpg",
+        "minimax_h3_studio_b.png",
+        "sub/minimax_h3_studio_c.jpg",
+    ]
+    video_generation.cleanup_comfyui_uploads(client)
+
+    assert not (input_root / "minimax_h3_studio_a.jpg").exists()
+    assert not (input_root / "minimax_h3_studio_b.png").exists()
+    assert not (subfolder / "minimax_h3_studio_c.jpg").exists()
+    assert client.uploaded_files == []
+
+
+def test_cleanup_comfyui_uploads_disabled_or_unsafe_paths(tmp_path, monkeypatch):
+    """未配置 input_dir 时不清理；目录穿越路径被拒绝。"""
+    monkeypatch.setattr(video_generation, "COMFYUI_INPUT_DIR", "")
+    outside = tmp_path / "outside.jpg"
+    outside.write_bytes(b"secret")
+    client = video_generation.ComfyClient()
+    client.uploaded_files = ["../outside.jpg"]
+    video_generation.cleanup_comfyui_uploads(client)
+    assert outside.exists(), "未配置 input_dir 时不得删除任何文件"
+
+    monkeypatch.setattr(video_generation, "COMFYUI_INPUT_DIR", str(tmp_path / "input"))
+    (tmp_path / "input").mkdir()
+    client2 = video_generation.ComfyClient()
+    client2.uploaded_files = ["../outside.jpg", "missing/minimax_h3_studio_x.jpg"]
+    video_generation.cleanup_comfyui_uploads(client2)
+    assert outside.exists(), "目录穿越路径必须被拒绝"
+    assert client2.uploaded_files == []
+
+
+def test_hybrid_turbo_template_keeps_reference_injection_anchors():
+    """turbo 混合模板必须保留参考注入路径依赖的节点锚点：
+    104/136（conditioning 运行时二选一裁剪）、1/2（首末帧 LoadImage）、
+    14/16（采样链重接线）。模板精简时误删任一节点都会让 turbo+混合参考失效。"""
+    workflow = json.loads(
+        (Path(video_generation.VIDEO_WORKFLOW_FOLDER) / "hybrid_video_turbo_api.json").read_text(encoding="utf-8")
+    )
+    for node_id in ("1", "2", "14", "16", "104", "136"):
+        assert node_id in workflow, f"hybrid turbo 模板缺少节点 {node_id}，参考注入路径会失效"

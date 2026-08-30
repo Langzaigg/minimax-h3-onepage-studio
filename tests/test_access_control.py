@@ -3,6 +3,7 @@ from datetime import date, timedelta
 from fastapi.testclient import TestClient
 
 import main
+import routers.access as access_router
 from services import access_control
 
 
@@ -15,6 +16,8 @@ def test_admin_mode_allows_direct_access_without_credentials(tmp_path, monkeypat
     """admin 模式（默认）：无需任何凭据即可直接以管理员身份访问，管理控制台同样可用。"""
     configure_access_paths(tmp_path, monkeypatch)
     monkeypatch.setattr(access_control, "ACCESS_MODE", "admin")
+    # register 路由读取的是 config.ACCESS_MODE 的模块级副本，需一并覆盖。
+    monkeypatch.setattr(access_router, "ACCESS_MODE", "admin")
     with TestClient(main.app) as client:
         tasks = client.get("/api/video/tasks")
         assert tasks.status_code == 200
@@ -52,7 +55,8 @@ def test_video_requires_api_key_and_admin_can_manage_full_keys(tmp_path, monkeyp
         with TestClient(main.app) as api_client:
             response = api_client.get("/api/video/tasks", headers={"X-API-Key": api_key})
             assert response.status_code == 200
-            assert response.json() == {"tasks": []}
+            # 分页接口：tasks 之外还返回 total/limit/offset
+            assert response.json() == {"tasks": [], "total": 0, "limit": 20, "offset": 0}
 
             response = api_client.post("/api/access/verify", json={"secret": api_key})
             assert response.status_code == 200

@@ -70,6 +70,10 @@ ACCESS_MODE = _setting("access.mode", "ACCESS_MODE", "admin")
 
 COMFYUI_BASE_URL = _setting("comfyui.base_url", "COMFYUI_BASE_URL", "http://127.0.0.1:8188")
 COMFYUI_TIMEOUT = _setting("comfyui.timeout_seconds", "COMFYUI_TIMEOUT", 60, int)
+# ComfyUI 的 input 目录（本机磁盘路径）。配置后每次生成结束会自动删除
+# 上传到该目录的临时图片/视频副本（minimax_h3_studio_* 前缀），避免长期堆积。
+# 留空则不清理（保持旧行为）。
+COMFYUI_INPUT_DIR = _setting("comfyui.input_dir", "COMFYUI_INPUT_DIR", "")
 COMFYUI_FL2VA_MODEL = _setting(
     "comfyui.models.fl2va_diffusion",
     "COMFYUI_FL2VA_MODEL",
@@ -102,15 +106,6 @@ COMFYUI_AUDIO_VAE = _setting(
     "COMFYUI_AUDIO_VAE",
     "minimax_h3_audio_vae_fp32.safetensors",
 )
-# 原生 NSFW 扩散模型：作为 fl2v 家族（文/首帧/尾帧/首尾帧）的一个 NSFW 档位出现，
-# 选中后直接把 UNETLoader 基模替换为该模型，**不挂任何 LoRA**（与 NSFW LoRA 档位互斥）。
-# 多模态参考（ref2v）不支持换基模，该档位不出现在 ref2v。留空表示未配置该档位。
-COMFYUI_NSFW_NATIVE_MODEL = _setting(
-    "comfyui.models.nsfw_native_diffusion",
-    "COMFYUI_NSFW_NATIVE_MODEL",
-    "",
-)
-COMFYUI_NSFW_NATIVE_ENABLED = bool(COMFYUI_NSFW_NATIVE_MODEL)
 # NSFW 档位：fl2v 家族（文/首帧/尾帧/首尾帧）与多模态参考（ref2v）各自一组 LoRA 配方，
 # 每个档位可叠加多个 LoRA（按配置顺序串联）。与原生基模档位互斥（二选一）。
 # LoRA 档位与 turbo 加速互斥：蒸馏 LoRA 与 NSFW LoRA 不能叠加；
@@ -170,6 +165,47 @@ COMFYUI_TURBO_REF2V_4STEP_LORA = _setting(
 )
 COMFYUI_TURBO_REF2V_4STEP_SHIFT = _setting(
     "comfyui.turbo.ref2v_4step_shift", "COMFYUI_TURBO_REF2V_4STEP_SHIFT", "12,3"
+)
+
+# 混合基模（Dasiwa MiniMax H3 Hybrid）：一个模型同时覆盖 fl2v（文本/首尾帧）与 ref2v
+# （多模态参考）两种能力，作为独立的「混合生成」模式（hybrid_to_video）出现。
+#   hybrid_diffusion       → 20 步版本（Non-Distilled），配合采样加速节点跳步；
+#   hybrid_turbo_diffusion → 蒸馏版本（Distilled），4 / 8 步直接采样，不跳步。
+# 任一文件名留空即禁用对应档位（前端不渲染该模式/档位）。
+COMFYUI_HYBRID_MODEL = _setting(
+    "comfyui.models.hybrid_diffusion",
+    "COMFYUI_HYBRID_MODEL",
+    "",
+)
+COMFYUI_HYBRID_TURBO_MODEL = _setting(
+    "comfyui.models.hybrid_turbo_diffusion",
+    "COMFYUI_HYBRID_TURBO_MODEL",
+    "",
+)
+HYBRID_ENABLED = bool(COMFYUI_HYBRID_MODEL)
+HYBRID_TURBO_ENABLED = bool(COMFYUI_HYBRID_TURBO_MODEL)
+# 混合模式普通档（Non-Distilled）采样参数：
+# 推荐 res_multistep/simple 或 euler/simple，Shift Video 10-12，Shift Audio 3-5；
+# 默认固定 25 步，配合 Spectrum 加速节点跳步。
+HYBRID_STEPS = _setting("comfyui.hybrid.steps", "COMFYUI_HYBRID_STEPS", 25, int)
+HYBRID_SAMPLER = _setting("comfyui.hybrid.sampler", "COMFYUI_HYBRID_SAMPLER", "res_multistep")
+HYBRID_SCHEDULER = _setting("comfyui.hybrid.scheduler", "COMFYUI_HYBRID_SCHEDULER", "simple")
+HYBRID_SHIFT_VIDEO = _setting("comfyui.hybrid.shift_video", "COMFYUI_HYBRID_SHIFT_VIDEO", 12.0, float)
+HYBRID_SHIFT_AUDIO = _setting("comfyui.hybrid.shift_audio", "COMFYUI_HYBRID_SHIFT_AUDIO", 3.0, float)
+# 混合模式 turbo 加速（Distilled，前端可选开关）：固定 8 步直接采样、不挂 Spectrum，
+# 分辨率档位不锁定，跟随用户所选档位。
+HYBRID_TURBO_STEPS = _setting("comfyui.hybrid.turbo_steps", "COMFYUI_HYBRID_TURBO_STEPS", 8, int)
+HYBRID_TURBO_SAMPLER = _setting(
+    "comfyui.hybrid.turbo_sampler", "COMFYUI_HYBRID_TURBO_SAMPLER", "euler"
+)
+HYBRID_TURBO_SCHEDULER = _setting(
+    "comfyui.hybrid.turbo_scheduler", "COMFYUI_HYBRID_TURBO_SCHEDULER", "simple"
+)
+HYBRID_TURBO_SHIFT_VIDEO = _setting(
+    "comfyui.hybrid.turbo_shift_video", "COMFYUI_HYBRID_TURBO_SHIFT_VIDEO", 12.0, float
+)
+HYBRID_TURBO_SHIFT_AUDIO = _setting(
+    "comfyui.hybrid.turbo_shift_audio", "COMFYUI_HYBRID_TURBO_SHIFT_AUDIO", 3.0, float
 )
 
 LLM_BASE_URL = _setting("llm.base_url", "LLM_BASE_URL", "http://127.0.0.1:8000/v1")

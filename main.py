@@ -8,7 +8,6 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from config import (
     ACCESS_MODE,
-    COMFYUI_NSFW_NATIVE_ENABLED,
     DAILY_STORAGE_CHECK_HOUR,
     DAILY_STORAGE_CHECK_MINUTE,
     FFMPEG_PATH,
@@ -156,14 +155,10 @@ async def frontend_config():
         },
         "ffmpeg_enabled": bool(FFMPEG_PATH),
         "access_mode": ACCESS_MODE,
-        # NSFW 档位：fl2v 家族与多模态参考（ref2v）各自一组 LoRA 配方；
-        # fl2v 额外在末尾追加「原生基模」档位（native: true，替换基模、不挂 LoRA，
-        # 仅该档位可与 turbo 组合）。前端据此渲染 NSFW 下拉。
+        # NSFW 档位：fl2v 家族与多模态参考（ref2v）各自一组 LoRA 配方。
+        # 混合模式（Dasiwa Hybrid）不叠加 NSFW LoRA（基模自带能力），无档位可渲染。
         "nsfw_presets": {
-            "fl2v": (
-                [{"id": preset["id"], "label": preset["label"]} for preset in NSFW_PRESETS["fl2v"]]
-                + ([{"id": "native", "label": "原生基模", "native": True}] if COMFYUI_NSFW_NATIVE_ENABLED else [])
-            ),
+            "fl2v": [{"id": preset["id"], "label": preset["label"]} for preset in NSFW_PRESETS["fl2v"]],
             "ref2v": [
                 {"id": preset["id"], "label": preset["label"]} for preset in NSFW_PRESETS["ref2v"]
             ],
@@ -172,7 +167,20 @@ async def frontend_config():
         "turbo_presets": {
             "fl2v": video_service.turbo_preset_ids("text_to_video"),
             "ref2v": video_service.turbo_preset_ids("reference_to_video"),
+            "hybrid": video_service.turbo_preset_ids("hybrid_to_video"),
         },
+        # 混合生成模式（Dasiwa Hybrid）能力开关：基模配置存在即可用。
+        "hybrid_enabled": bool(video_service.COMFYUI_HYBRID_MODEL),
+        "hybrid_turbo_enabled": bool(video_service.COMFYUI_HYBRID_TURBO_MODEL),
+        "hybrid_steps": video_service.HYBRID_STEPS,
+        "hybrid_sampler": video_service.HYBRID_SAMPLER,
+        "hybrid_scheduler": video_service.HYBRID_SCHEDULER,
+        "hybrid_shift_video": video_service.HYBRID_SHIFT_VIDEO,
+        "hybrid_shift_audio": video_service.HYBRID_SHIFT_AUDIO,
+        "hybrid_turbo_sampler": video_service.HYBRID_TURBO_SAMPLER,
+        "hybrid_turbo_scheduler": video_service.HYBRID_TURBO_SCHEDULER,
+        "hybrid_turbo_shift_video": video_service.HYBRID_TURBO_SHIFT_VIDEO,
+        "hybrid_turbo_shift_audio": video_service.HYBRID_TURBO_SHIFT_AUDIO,
     }
 
 

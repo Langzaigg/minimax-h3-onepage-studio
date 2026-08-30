@@ -19,12 +19,19 @@ access:
 comfyui:
   base_url: "http://127.0.0.1:8188"
   timeout_seconds: 60
+  # 可选：ComfyUI 的 input 目录（本机磁盘路径）。配置后每次生成结束（成功或失败）
+  # 会自动删除本次上传的临时图片/视频副本（minimax_h3_studio_* 前缀），
+  # 避免 input 目录长期堆积垃圾文件。留空则不清理。
+  # input_dir: "D:/ComfyUI_windows_portable/ComfyUI/input"
   models:
     fl2va_diffusion: "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
     ref2va_diffusion: "minimax_h3_ref2va_pruned_int8_convrot.safetensors"
-    # 原生 NSFW 扩散模型：fl2v 家族「原生基模」档位（id=native，替换 UNETLoader 基模、不挂 LoRA），
-    # 与 nsfw.*_presets 的 LoRA 档位二选一互斥；该档位可与 turbo 组合。留空（""）则不出现该档位。
-    nsfw_native_diffusion: ""
+    # Dasiwa 混合基模（fl2v + ref2v 合一）：「混合生成」独立模式。
+    # hybrid_diffusion = 20 步版本（Non-Distilled，配 Spectrum 加速跳步）；
+    # hybrid_turbo_diffusion = 蒸馏版本（Distilled，4/8 步不跳步）。
+    # 文件名留空（""）则禁用对应档位（hybrid_diffusion 为空时整个混合模式不出现）。
+    hybrid_diffusion: "DasiwaMinimaxH3_dasiwaHybridV1.safetensors"
+    hybrid_turbo_diffusion: "DasiwaMinimaxH3_dasiwaHybrid8turboV1.safetensors"
     text_encoder: "qwen3vl_32b_minimax_h3_int8_convrot.safetensors"
     video_vae: "minimax_h3_video_vae_fp16.safetensors"
     audio_vae: "minimax_h3_audio_vae_fp32.safetensors"
@@ -60,6 +67,22 @@ comfyui:
     fl2v_4step_shift: "6,3"
     ref2v_4step_lora: ""
     ref2v_4step_shift: "12,3"
+  # 混合模式（Dasiwa Hybrid）采样参数：
+  # 普通档（Non-Distilled）：推荐 res_multistep/simple 或 euler/simple，
+  #   Shift Video 10-12、Shift Audio 3-5；默认固定 25 步，配合 Spectrum 加速节点跳步。
+  # turbo 加速（Distilled，前端可选开关）：固定 8 步直接采样、不挂 Spectrum，
+  #   分辨率跟随用户所选档位。
+  hybrid:
+    steps: 25
+    sampler: "res_multistep"
+    scheduler: "simple"
+    shift_video: 12
+    shift_audio: 3
+    turbo_steps: 8
+    turbo_sampler: "euler"
+    turbo_scheduler: "simple"
+    turbo_shift_video: 12
+    turbo_shift_audio: 3
 
 llm:
   base_url: "http://127.0.0.1:8000/v1"
@@ -72,6 +95,9 @@ llm:
   context_window: 131000
   context_margin_tokens: 512
   min_completion_tokens: 512
+  # NSFW 破甲提示词开关：true 时润色系统提示词以拼接方式追加破甲与 NSFW 风格指南
+  # （所有生成模式统一生效，含混合生成模式）。
+  nsfw_armor: true
 
 ffmpeg:
   # 参考视频转 480p GIF 喂给润色模型、参考视频压缩到输出分辨率、视频转 GIF 下载均依赖该路径；

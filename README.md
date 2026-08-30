@@ -4,12 +4,12 @@
 
 ### MiniMax H3 一页式创作台
 
-内置 FL2VA 与 Ref2VA 工作流的独立视频生成服务，集成提示词润色、异步任务、实时进度、私有资源代理和 API Key 管理。
+内置 FL2VA、Ref2VA 与 Dasiwa Hybrid（动漫偏向混合生成）工作流的独立视频生成服务，集成提示词润色、异步任务、实时进度、私有资源代理和 API Key 管理。
 
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.133%2B-009688?logo=fastapi&logoColor=white)
 ![ComfyUI](https://img.shields.io/badge/ComfyUI-MiniMax_H3-222222)
-![Workflow](https://img.shields.io/badge/Workflow-FL2VA_%2B_Ref2VA-5B5BD6)
+![Workflow](https://img.shields.io/badge/Workflow-FL2VA_%2B_Ref2VA_%2B_Hybrid-5B5BD6)
 
 [快速开始](#快速开始) · [ComfyUI 部署](#comfyui-部署) · [配置](#配置) · [API](#api-使用) · [真实示例](#真实生成示例)
 
@@ -28,11 +28,13 @@
 | 能力 | 说明 |
 |---|---|
 | 一页式创作 | 文本、首帧、末帧、首尾帧和多模态参考生成集中在同一页面 |
-| 内置工作流 | 仓库直接提供 MiniMax H3 FL2VA 与 Ref2VA API 工作流 |
+| 内置工作流 | 仓库直接提供 MiniMax H3 FL2VA、Ref2VA 与 Dasiwa Hybrid API 工作流 |
+| 混合生成（动漫偏向） | Dasiwa Hybrid 单基模覆盖文本/首尾帧/多模态参考，官方节点锚定首尾关键帧，可选 Turbo 8 步加速 |
+| 素材拖拽互换 | 参考图片与首/末帧之间可直接拖拽交换位置，参考图之间可换位 |
 | 动态节点图 | 根据输入自动增删图片、视频和音频读取分支 |
 | 多模态参考 | 最多 9 张图片、3 个视频、3 个独立音频，可使用视频自带音轨 |
 | AI 提示词润色 | 参考图、视频代表帧/480p 动画 GIF 和音频频谱均可作为视觉模型输入 |
-| 持久化异步任务 | 支持排队、采样进度、重启恢复、历史回填和结果下载 |
+| 持久化异步任务 | 支持排队、采样进度、重启恢复、历史分页（每页 20 条）回填和结果下载 |
 | 后端资源代理 | 前端不接触 ComfyUI 地址、prompt ID 或真实输出路径 |
 | 本地访问控制 | 管理员密钥、API Key、浏览器会话、Key 撤销和调用统计 |
 
@@ -49,7 +51,7 @@ flowchart LR
     App -->|"Protected media proxy"| Client
 ```
 
-浏览器只保存自己创建的不可预测任务 ID。任务列表接口必须显式提交这些 ID，不会枚举服务端全局历史；唯一例外是管理员（`X-Admin-Key`）可以查看全部任务历史。
+任务历史按身份隔离并分页返回：每个 API Key/注册用户只能看到自己创建的任务，管理员可查看全部历史。`GET /api/video/tasks` 返回 `total/limit/offset`，前端按每页 20 条渲染翻页控件，避免历史过多时一次性全量加载。
 
 访问模式由 `access.mode` 控制：
 
@@ -114,7 +116,8 @@ python -B run.py
 |---|---|---|
 | `fl2va_diffusion` | `minimax_h3_fl2va_pruned_int8_convrot.safetensors` | `models/diffusion_models/` |
 | `ref2va_diffusion` | `minimax_h3_ref2va_pruned_int8_convrot.safetensors` | `models/diffusion_models/` |
-| `nsfw_native_diffusion`（可选） | `PinkCherry_MiniMax_H3_pruned_int8_convrot-beta-0.6.safetensors` | `models/diffusion_models/` |
+| `hybrid_diffusion`（可选） | `DasiwaMinimaxH3_dasiwaHybridV1.safetensors` | `models/diffusion_models/` |
+| `hybrid_turbo_diffusion`（可选） | `DasiwaMinimaxH3_dasiwaHybrid8turboV1.safetensors` | `models/diffusion_models/` |
 | `nsfw.fl2v_presets`（可选） | `HMNSFW-AIO-V2.5.safetensors`、`Vagina_minimax-h3_epoch20.safetensors` | `models/loras/` |
 | `nsfw.ref2v_presets`（可选） | `AfterMidnight_ref2va_h3_sexytime_rank64-v1.2.safetensors` | `models/loras/` |
 | `turbo.fl2v_8step_lora`（可选） | `minimax_h3_fl2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors` | `models/loras/` |
@@ -124,14 +127,15 @@ python -B run.py
 | `video_vae` | `minimax_h3_video_vae_fp16.safetensors` | `models/vae/` |
 | `audio_vae` | `minimax_h3_audio_vae_fp32.safetensors` | `models/vae/` |
 
-模型可从 [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3) 获取；turbo 蒸馏 lora 来自 Minimax-H3-Turbo 官方发布。预期目录：
+模型可从 [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3) 获取；turbo 蒸馏 lora 来自 Minimax-H3-Turbo 官方发布；hybrid 基模来自 Dasiwa（混合 fl2v 与 ref2v 能力，普通档 Non-Distilled 与 turbo Distilled 两个版本）。预期目录：
 
 ```text
 ComfyUI/models/
 ├─ diffusion_models/
 │  ├─ minimax_h3_fl2va_pruned_int8_convrot.safetensors
 │  ├─ minimax_h3_ref2va_pruned_int8_convrot.safetensors
-│  └─ PinkCherry_MiniMax_H3_pruned_int8_convrot-beta-0.6.safetensors      # 可选：NSFW 原生基模（fl2v）
+│  ├─ DasiwaMinimaxH3_dasiwaHybridV1.safetensors                         # 可选：混合生成（普通档 25 步）
+│  └─ DasiwaMinimaxH3_dasiwaHybrid8turboV1.safetensors                   # 可选：混合生成（turbo）
 ├─ loras/
 │  ├─ minimax_h3_fl2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors      # 可选：turbo
 │  ├─ minimax_h3_fl2v_turbo_4step_v1.1_768p_comfyui_bf16.safetensors      # 可选：turbo
@@ -150,15 +154,16 @@ ComfyUI/models/
 
 ```text
 MiniMaxH3ImageToVideo       MiniMaxH3ReferenceToVideo
+MiniMaxH3AddGuide           MiniMaxH3SigmaShift（内置）
 LoadImage / ImageScale     LoadVideo / GetVideoComponents
 LoadAudio                  CreateVideo / SaveVideo
 ```
 
 > [!NOTE]
-> 采样加速节点 **Spectrum Apply MiniMax H3**（`SpectrumApplyMiniMaxH3`，来自 [ComfyUI-Spectrum-MiniMax-H3](https://github.com/xmarre/ComfyUI-Spectrum-MiniMax-H3)）默认**不启用**。仅在 `comfyui.spectrum_apply.enabled: true` 时 FL2VA 与 Ref2VA 两条**普通**工作流才会串联该节点（turbo 工作流不使用）；此时 ComfyUI 必须安装上述自定义节点；关闭时工作流会完全移除该节点并直接回连模型加载器，**无需安装该依赖**。详见[采样加速](#采样加速spectrum)。
+> 采样加速节点 **Spectrum Apply MiniMax H3**（`SpectrumApplyMiniMaxH3`，来自 [ComfyUI-Spectrum-MiniMax-H3](https://github.com/xmarre/ComfyUI-Spectrum-MiniMax-H3)）默认**不启用**。仅在 `comfyui.spectrum_apply.enabled: true` 时 FL2VA、Ref2VA 与混合生成（普通档）三条**普通**工作流才会串联该节点（turbo 工作流不使用）；此时 ComfyUI 必须安装上述自定义节点；关闭时工作流会完全移除该节点并直接回连模型加载器，**无需安装该依赖**。详见[采样加速](#采样加速spectrum)。
 
 > [!TIP]
-> 配置任一 turbo lora 后，工作流还会使用 `MiniMaxH3SigmaShift` 与 `LoraLoaderModelOnly` 节点（均为 ComfyUI 内置）。
+> 配置任一 turbo lora（或 hybrid turbo 基模）后，工作流还会使用 `MiniMaxH3SigmaShift` 与 `LoraLoaderModelOnly` 节点（后者仅 LoRA 档位需要；SigmaShift 为 ComfyUI 内置）。
 
 启动 ComfyUI 后执行检查：
 
@@ -186,14 +191,33 @@ access:
 comfyui:
   base_url: "http://127.0.0.1:8188"
   timeout_seconds: 60
+  # 可选：ComfyUI 的 input 目录（本机磁盘路径）。配置后每次生成结束（成功或失败）
+  # 会自动删除本次上传的临时图片/视频副本（minimax_h3_studio_* 前缀），
+  # 避免 input 目录长期堆积垃圾文件。留空则不清理。
+  # input_dir: "D:/ComfyUI_windows_portable/ComfyUI/input"
   models:
     fl2va_diffusion: "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
     ref2va_diffusion: "minimax_h3_ref2va_pruned_int8_convrot.safetensors"
-    # 原生 NSFW 基模档位（可选；仅 fl2v 家族，与 LoRA 档位二选一互斥）
-    nsfw_native_diffusion: "PinkCherry_MiniMax_H3_pruned_int8_convrot-beta-0.6.safetensors"
+    # 混合生成基模（Dasiwa Hybrid，可选；配置后前端出现「混合生成（动漫偏向）」模式，普通档 Non-Distilled 固定 25 步）
+    hybrid_diffusion: "DasiwaMinimaxH3_dasiwaHybridV1.safetensors"
+    # 混合生成 turbo 基模（可选；Distilled，配置后混合模式出现「Turbo 加速」可选下拉，固定 8 步）
+    hybrid_turbo_diffusion: "DasiwaMinimaxH3_dasiwaHybrid8turboV1.safetensors"
     text_encoder: "qwen3vl_32b_minimax_h3_int8_convrot.safetensors"
     video_vae: "minimax_h3_video_vae_fp16.safetensors"
     audio_vae: "minimax_h3_audio_vae_fp32.safetensors"
+  # 混合生成参数（普通档固定 25 步 + Spectrum 跳步；turbo 加速为可选下拉，固定 8 步）
+  hybrid:
+    steps: 25
+    sampler: "res_multistep"
+    scheduler: "simple"
+    shift_video: 12
+    shift_audio: 3
+    # turbo（Distilled）：euler/simple、固定 8 步、不挂 Spectrum、分辨率自由选
+    turbo_steps: 8
+    turbo_sampler: "euler"
+    turbo_scheduler: "simple"
+    turbo_shift_video: 12
+    turbo_shift_audio: 3
   # 采样加速（默认不启用）
   spectrum_apply:
     enabled: false
@@ -244,6 +268,7 @@ $env:VIDEO_SERVICE_CONFIG = 'D:\config\minimax-h3-studio.yml'
 | `COMFYUI_BASE_URL` | ComfyUI 地址 |
 | `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | 润色模型配置 |
 | `COMFYUI_FL2VA_MODEL` / `COMFYUI_REF2VA_MODEL` | 两个扩散模型文件名 |
+| `COMFYUI_HYBRID_MODEL` / `COMFYUI_HYBRID_TURBO_MODEL` | 混合生成基模文件名（留空禁用混合模式/混合 turbo 档位） |
 | `COMFYUI_TEXT_ENCODER` | 文本编码器文件名 |
 | `COMFYUI_VIDEO_VAE` / `COMFYUI_AUDIO_VAE` | VAE 文件名 |
 | `COMFYUI_SPECTRUM_ENABLED` | 采样加速开关（true/false） |
@@ -268,6 +293,18 @@ $env:VIDEO_SERVICE_CONFIG = 'D:\config\minimax-h3-studio.yml'
 ### Ref2VA：多模态参考生成
 
 [`video_workflows/reference_video_api.json`](video_workflows/reference_video_api.json) 根据上传内容动态创建图片、视频与音频读取分支。自动比例优先使用第一张参考图，否则使用 16:9。
+
+### Dasiwa Hybrid：混合生成（动漫偏向）
+
+[`video_workflows/hybrid_video_api.json`](video_workflows/hybrid_video_api.json)（普通档 Non-Distilled）与 [`video_workflows/hybrid_video_turbo_api.json`](video_workflows/hybrid_video_turbo_api.json)（turbo Distilled）是独立模式（前端置于**最前标签卡「混合生成（动漫偏向）」**），使用 Dasiwa Hybrid 基模——**一个模型同时覆盖 fl2v（文本/首尾帧）与 ref2v（多模态参考）能力**，通过 conditioning 节点按上传内容动态组合：
+
+- 上传参考素材（图片/视频/音频）→ 走 `MiniMaxH3ReferenceToVideo`（136）；
+- 参考素材 + 首/末帧同时上传 → **混合参考**：首/末帧经官方 `MiniMaxH3AddGuide` 节点锚定为关键帧（`minimax_keyframes`），与 136 的 `minimax_refs` 共存，官方模型后端原生支持该混合布局——**全部使用 ComfyUI 官方节点，不依赖任何第三方插件节点，也不调用云端 API**；
+- 仅上传首/末帧（无参考素材）→ 走 `MiniMaxH3ImageToVideo`（104），支持纯文本与首尾帧。
+
+普通档固定 **25 步**，与 FL2VA/Ref2VA 普通工作流一致串联 **Spectrum** 加速节点跳步（`res_multistep/simple`、shift video 10-12 / audio 3-5）；**Turbo 加速为可选下拉**（仅对混合工作流生效），开启后换蒸馏基模（`hybrid-turbo-8`，`euler/simple`）固定 8 步直采、不挂 Spectrum；分辨率档位两种情况下都自由选择（turbo 不锁定 0.5 MP）。
+
+润色使用**混合专属系统提示词**：混合参考理解（关键帧锚定 + 参考媒体共同约束）与动漫偏向美术指导（默认 2D 赛璐璐式风格词汇，用户明确指定其他风格时跟随用户）为混合专属内容。
 
 `ref_image_size` 支持：
 
@@ -315,26 +352,21 @@ Spectrum 通过对隐藏特征做 Chebyshev 岭回归预测来跳过部分 trans
 
 **Ref2V 家族**（多模态参考生成，[`video_workflows/reference_video_turbo_api.json`](video_workflows/reference_video_turbo_api.json)）：`0.5（4step）` / `0.5（6step）` / `0.5（8step）` 三档（`turbo-0.5-4` / `turbo-0.5-6` / `turbo-0.5-8`）**共用同一个** `ref2v_4step_lora`（shift 12 / 3），仅步数不同。
 
+**Dasiwa Hybrid 家族**（混合生成，[`video_workflows/hybrid_video_turbo_api.json`](video_workflows/hybrid_video_turbo_api.json)）：**Turbo 加速为独立可选下拉**（仅混合模式显示），开启后直接换蒸馏基模（`hybrid_turbo_diffusion`，**不挂 LoRA**），档位 id 为 `hybrid-turbo-8`（`euler/simple`、shift 12 / 3、固定 8 步）；关闭时走 25 步普通工作流（`res_multistep/simple` + Spectrum 跳步）。两种情况的分辨率档位均自由选择（turbo 不锁定 MP）。
+
 实现要点：
 
-- 步数直接写入 `BasicScheduler.steps`，`MiniMaxH3SigmaShift` 按步数重建对应 sigma 网格，**不做任何跳步 / sigma 子集处理**。
+- 步数直接写入 `BasicScheduler.steps`，`MiniMaxH3SigmaShift` 按步数重建对应 sigma 网格，**不做任何跳步 / sigma 子集处理**（hybrid turbo 同理）。
 - turbo 工作流不串联 Spectrum 采样加速节点（蒸馏模型本身只需 4~8 步）。
 - **NSFW LoRA 与 turbo 互斥**：NSFW LoRA 与 turbo 蒸馏 LoRA 不能叠加。选中 LoRA 档位后前端只保留普通分辨率档位；接口同时传 `nsfw=true` + `nsfw_preset=<lora 档位>` 与 `turbo-*` 档位返回 400。
-- **原生基模档位例外**：fl2v 的「原生基模」档位（`nsfw_preset=native`）不挂 LoRA，可与 turbo 组合（蒸馏 lora 直接作用于原生 NSFW 基模）。
-- 某个 lora 文件名留空即禁用对应档位（前端不渲染该选项，接口传参返回 400）；`scripts/check_comfyui.py` 会校验已配置的 turbo lora 文件存在。
+- 某个 lora 文件名留空即禁用对应档位（前端不渲染该选项，接口传参返回 400）；`scripts/check_comfyui.py` 会校验已配置的 turbo lora 与 hybrid 基模文件存在。
 
-## NSFW 档位（LoRA 配方 + 原生基模）
+## NSFW 档位（LoRA 配方）
 
-NSFW 有两种互斥的实现，前端下拉里二选一：
-
-1. **NSFW LoRA 档位**：配置在 `comfyui.nsfw` 下按模式分组，每个档位可叠加多个 LoRA（按配置顺序串联在基模之后，各自带强度）：
-2. **原生基模档位**（仅 fl2v 家族，`id=native`）：`comfyui.models.nsfw_native_diffusion` 指定模型，选中后直接替换 UNETLoader 基模、不挂任何 LoRA。
+NSFW 通过 `comfyui.nsfw` 下的 LoRA 配方按模式分组实现，每个档位可叠加多个 LoRA（按配置顺序串联在基模之后，各自带强度）：
 
 ```yaml
 comfyui:
-  models:
-    # 原生基模档位（仅 fl2v 家族；与 LoRA 档位二选一互斥，可与 turbo 组合；留空则该档位不出现）
-    nsfw_native_diffusion: "PinkCherry_MiniMax_H3_pruned_int8_convrot-beta-0.6.safetensors"
   nsfw:
     fl2v_presets:          # 文生视频 / 首帧 / 尾帧 / 首尾帧
       - id: "aio"
@@ -346,7 +378,7 @@ comfyui:
         loras:
           - {lora: "HMNSFW-AIO-V2.5.safetensors", strength: 0.65}
           - {lora: "Vagina_minimax-h3_epoch20.safetensors", strength: 0.35}
-    ref2v_presets:         # 多模态参考生成（不支持原生基模档位）
+    ref2v_presets:         # 多模态参考生成
       - id: "aftermidnight"
         label: "AfterMidnight 1.0"
         loras:
@@ -357,17 +389,16 @@ comfyui:
 |---|---|
 | `nsfw=false`（默认） | 常规 fl2v / ref2v 基模，不挂任何 LoRA |
 | `nsfw=true` + `nsfw_preset=<id>` | 按该档位串联 LoRA（`UNET → Lora → … → Spectrum/调度器`），润色注入 NSFW 风格指南 |
-| `nsfw=true` + `nsfw_preset=native`（仅 fl2v） | UNETLoader 基模替换为原生 NSFW 模型，不挂 LoRA，可与 turbo 组合 |
-| `nsfw=true` 且 `nsfw_preset` 留空 | 回落该模式第一个 LoRA 档位（历史任务兼容；旧参数 `nsfw_native=true` 回落为 native 档位） |
+| `nsfw=true` 且 `nsfw_preset` 留空 | 回落该模式第一个 LoRA 档位（历史任务兼容；旧参数 `nsfw_native=true` 视为开启并回落默认 LoRA 档位） |
 
 接线与约束：
 
 - fl2v 档位的 LoRA 链从节点 `151` 起（`152`、`153`… 依次叠加），ref2v 从 `144` 起；关闭 Spectrum 时直接回连调度器/引导器。
 - 两个分组互不影响：fl2v 档位只作用于文/首帧/尾帧/首尾帧，ref2v 档位只作用于多模态参考。
-- **LoRA 档位与 turbo 互斥**：蒸馏 LoRA 与 NSFW LoRA 不可叠加，选中 LoRA 档位时 turbo 档位不渲染，接口组合传参返回 400；「原生基模」档位（native）例外，可与 turbo 组合。
-- LoRA 文件需位于 ComfyUI `models/loras/` 目录、原生基模位于 `models/diffusion_models/`（`scripts/check_comfyui.py` 会校验）；某模式未配置任何档位时前端不渲染 NSFW 下拉，接口传 `nsfw=true` 返回 400。
-- 前端下拉选项由 `/api/config` 的 `nsfw_presets` 提供（fl2v 末尾的 `native` 项即原生基模档位），改配置（增删档位、调强度、换基模）重启后即可生效，无需改代码。
-- 历史记录兼容：旧参数 `nsfw_strength`（>0）回落为 `nsfw=true`（开启 + 默认 LoRA 档位）；`nsfw_native=true` 在 fl2v 家族回落为 native 档位（ref2v 回落默认 LoRA 档位）；历史任务回填时同样按此规则显示。
+- **LoRA 档位与 turbo 互斥**：蒸馏 LoRA 与 NSFW LoRA 不可叠加，选中 LoRA 档位时 turbo 档位不渲染，接口组合传参返回 400。
+- LoRA 文件需位于 ComfyUI `models/loras/` 目录（`scripts/check_comfyui.py` 会校验）；某模式未配置任何档位时前端不渲染 NSFW 下拉，接口传 `nsfw=true` 返回 400。
+- 前端下拉选项由 `/api/config` 的 `nsfw_presets` 提供，改配置（增删档位、调强度）重启后即可生效，无需改代码。
+- 历史记录兼容：旧参数 `nsfw_strength`（>0）回落为 `nsfw=true`（开启 + 默认 LoRA 档位）；`nsfw_native=true` 回落为 `nsfw=true` + 默认 LoRA 档位；历史任务回填时同样按此规则显示。
 
 ## 视频转 GIF 下载
 
@@ -410,14 +441,14 @@ curl -X POST http://127.0.0.1:7788/api/video/tasks \
 
 `resolution_preset` 可选：留空走普通工作流（使用 `resolution_megapixels`）；fl2v 支持 `turbo-0.5-6` / `turbo-0.5-8` / `turbo-1.0-4`（详见上文「Turbo 蒸馏档位」）。
 
-`nsfw` 可选布尔值（默认 `false`），配合 `nsfw_preset=<id>` 选择 NSFW 档位（详见「NSFW 档位（LoRA 配方 + 原生基模）」）：
+`nsfw` 可选布尔值（默认 `false`），配合 `nsfw_preset=<id>` 选择 NSFW 档位（详见「NSFW 档位（LoRA 配方）」）：
 
 ```bash
   -F "nsfw=true" \
   -F "nsfw_preset=aio-vagina" \
 ```
 
-`nsfw_preset` 取 `/api/config` 的 `nsfw_presets.fl2v` 中的 id：LoRA 档位（如 `aio` / `aio-vagina`）与 `resolution_preset`（turbo）**互斥**，同时传参会返回 400；`native`（原生基模档位）不挂 LoRA，可与 turbo 组合。旧参数 `nsfw_strength > 0` 视为开启（回落默认 LoRA 档位）；`nsfw_native=true` 回落为 `native` 档位。
+`nsfw_preset` 取 `/api/config` 的 `nsfw_presets.fl2v` 中的 id（如 `aio` / `aio-vagina`），与 `resolution_preset`（turbo）**互斥**，同时传参会返回 400。旧参数 `nsfw_strength > 0` 视为开启（回落默认 LoRA 档位）；`nsfw_native=true` 回落为 `nsfw=true` + 默认 LoRA 档位（历史任务回填兼容）。
 
 ### 创建多模态参考任务
 
@@ -437,6 +468,33 @@ curl -X POST http://127.0.0.1:7788/api/video/reference-tasks \
 ```
 
 注意：参考生成接口的 turbo 档位为 `turbo-0.5-4` / `turbo-0.5-6` / `turbo-0.5-8`（共用同一 lora，仅步数不同）；`nsfw` 同样接受并叠加 `nsfw_presets.ref2v` 的 LoRA 档位（不替换 Ref2VA 基模），与 turbo 档位互斥。
+
+### 创建混合生成任务（Dasiwa Hybrid）
+
+```bash
+curl -X POST http://127.0.0.1:7788/api/video/hybrid-tasks \
+  -H "X-API-Key: dc_xxx" \
+  -F "prompt=An anime classroom scene with cherry blossoms" \
+  -F "duration=5" \
+  -F "resolution_megapixels=0.4" \
+  -F "aspect_ratio=auto" \
+  -F "polish_prompt_first=true" \
+  -F "ref_image_size=match" \
+  -F "first_frame=@first.png" \
+  -F "last_frame=@last.png" \
+  -F "reference_images=@character.png"
+```
+
+`resolution_preset` 留空走普通工作流（固定 25 步 + Spectrum 跳步，分辨率由 `resolution_megapixels` 自由指定）；`hybrid-turbo-8` 为 turbo 蒸馏档位（固定 8 步直采，分辨率同样自由选）。上传参考素材时走多模态参考通道，首/末帧经官方 `MiniMaxH3AddGuide` 锚定为关键帧与参考媒体共存（混合参考）；无参考素材时走文本/首尾帧通道。
+
+### 任务历史（分页）
+
+```bash
+curl -H "X-API-Key: dc_xxx" \
+  "http://127.0.0.1:7788/api/video/tasks?limit=20&offset=0"
+```
+
+返回 `{"tasks": [...], "total": n, "limit": 20, "offset": 0}`，按创建时间倒序分页。非管理员身份自动限定为自己创建的任务，管理员可查看全部历史。
 
 ### 查询进度与结果
 
@@ -486,6 +544,7 @@ curl -H "X-API-Key: dc_xxx" \
 - 客户端无法获得 ComfyUI 地址、prompt ID 或真实文件路径。
 - 历史接口按身份隔离：每个 API Key/注册用户只能看到自己创建的任务，管理员可查看全部。
 - API Key、调用统计和任务文件均维护在部署机器本地。
+- 配置 `comfyui.input_dir` 后，每次生成结束（成功或失败）自动删除本次上传到 ComfyUI input 的临时图片副本（`minimax_h3_studio_*` 前缀），避免目录无限堆积。
 - 默认保留终态任务 90 天，每周日 03:00 清理。
 - 每天 00:05 检查磁盘；占用达到 90% 时从最旧终态任务开始清理。
 - 润色中、准备中、排队中和运行中的任务不会被自动清理。
@@ -493,7 +552,7 @@ curl -H "X-API-Key: dc_xxx" \
 ## 验证
 
 ```powershell
-# 自动化测试
+# 自动化测试（临时目录固定在项目内 .pytest_tmp/，见 pytest.ini）
 python -B -m pytest -q
 
 # 应用导入

@@ -132,24 +132,17 @@ def validate_reference_counts(images: int, videos: int, audios: int) -> None:
 def resolve_nsfw(nsfw: bool, nsfw_preset: str, mode: str) -> dict | None:
     """解析任务的 NSFW 档位（含该档要叠加的 LoRA 列表），关闭时返回 None。
 
-    - fl2v 家族与多模态参考（ref2v）各自一组 LoRA 档位；fl2v 额外提供「原生基模」档位
-      （id=native，替换 UNETLoader 基模、不挂 LoRA），与 LoRA 档位二选一互斥。
-    - 开启但未指定档位时回落到该模式第一个 LoRA 档位（历史任务兼容）；
-      旧参数 nsfw_native=true 由调用方映射为 native 档位。
+    - fl2v 家族与多模态参考（ref2v）各自一组 LoRA 档位；
+    - 开启但未指定档位时回落到该模式第一个 LoRA 档位（历史任务兼容）。
     """
     if not nsfw:
         return None
     reference = mode == "reference_to_video"
     family = "多模态参考模式" if reference else "当前模式"
     available = list(video_service.nsfw_preset_ids(mode))
-    if not reference and video_service.COMFYUI_NSFW_NATIVE_ENABLED:
-        available.append(video_service.NSFW_NATIVE_PRESET_ID)
     if not available:
         group = "ref2v" if reference else "fl2v"
-        detail = (
-            f"{family}未配置任何 NSFW 档位（comfyui.nsfw.{group}_presets 为空"
-            + ("" if reference else " 且未配置 comfyui.models.nsfw_native_diffusion") + "）"
-        )
+        detail = f"{family}未配置任何 NSFW 档位（comfyui.nsfw.{group}_presets 为空）"
         raise HTTPException(status_code=400, detail=detail)
     preset = video_service.resolve_nsfw_preset(nsfw_preset, mode)
     if preset is None:
@@ -161,11 +154,8 @@ def resolve_nsfw(nsfw: bool, nsfw_preset: str, mode: str) -> dict | None:
 
 
 def validate_nsfw_turbo_conflict(nsfw_preset: dict | None, turbo: dict | None) -> None:
-    """NSFW LoRA 与 turbo 蒸馏 LoRA 互斥：两者不可叠加，只能选其一。
-
-    仅 LoRA 档位受限；「原生基模」档位不挂 LoRA，仍可与 turbo 组合。
-    """
-    if nsfw_preset and turbo and not nsfw_preset.get("native"):
+    """NSFW LoRA 与 turbo 蒸馏 LoRA 互斥：两者不可叠加，只能选其一。"""
+    if nsfw_preset and turbo:
         raise HTTPException(
             status_code=400,
             detail="NSFW LoRA 与 turbo 加速不能同时使用，请关闭 NSFW 或选择普通分辨率档位",
@@ -184,7 +174,8 @@ def resolve_resolution(
 
     返回 (有效兆像素, 档位 id, turbo 工作流参数)：
     - 空档位 → 普通工作流，使用 resolution_megapixels；
-    - turbo-* → 校验当前模式是否支持且对应 lora 已配置，返回档位对应的 MP 与 turbo 参数。
+    - turbo-* → 校验当前模式是否支持且对应 lora 已配置，返回档位对应的 MP 与 turbo 参数；
+      混合模式（hybrid_to_video）turbo 不锁定分辨率，直接采用请求的 MP。
     """
     preset = (resolution_preset or "").strip()
     if not preset:
@@ -196,6 +187,8 @@ def resolve_resolution(
             status_code=400,
             detail=f"不支持的分辨率档位：{preset}（当前模式可用 turbo 档位：{allowed}）",
         )
+    if mode == "hybrid_to_video":
+        return resolution_megapixels, preset, turbo
     return float(turbo["megapixels"]), preset, turbo
 
 
@@ -299,6 +292,76 @@ async def reference_prompt_polish(
         for group in groups:
             for path, _ in group:
                 path.unlink(missing_ok=True)
+
+
+@router.post("/hybrid-prompt-polish", response_model=PromptPolishResponse, tags=[TAG_POLISH])
+async def hybrid_prompt_polish(
+    prompt: Annotated[str, Form(min_length=1)],
+    duration: Annotated[float, Form(ge=VIDEO_MIN_DURATION, le=VIDEO_MAX_DURATION)] = VIDEO_DEFAULT_DURATION,
+    nsfw: Annotated[
+        bool, Form(description="NSFW 开关：混合模式润色始终自动打开 NSFW 破甲，此处仅控制是否额外注入 NSFW 风格指南")
+    ] = False,
+    nsfw_strength: Annotated[float, Form(description="已废弃：>0 视为 nsfw=true")] = 0.0,
+    nsfw_native: Annotated[bool, Form(description="已废弃：true 视为 nsfw=true")] = False,
+    use_video_audio: Annotated[bool, Form()] = True,
+    first_frame: UploadFile | None = File(None),
+    last_frame: UploadFile | None = File(None),
+    reference_images: list[UploadFile] = File(default=[]),
+    reference_videos: list[UploadFile] = File(default=[]),
+    reference_audios: list[UploadFile] = File(default=[]),
+):
+    """混合模式（Dasiwa Hybrid）润色：上传参考素材时走六段式全参考润色
+    （首尾帧不参与分析，作为生成时的关键帧锚定），否则走文本/首尾帧润色；
+    无论 nsfw 是否开启，破甲（NSFW 增强）始终自动打开。"""
+    nsfw = _merge_nsfw(nsfw, nsfw_native, nsfw_strength)
+    has_reference = bool(reference_images or reference_videos or reference_audios)
+    if has_reference:
+        validate_reference_counts(len(reference_images), len(reference_videos), len(reference_audios))
+        validate_reference_uploads(reference_images, reference_videos, reference_audios)
+        groups: list[list[tuple[Path, str]]] = []
+        try:
+            for uploads in (reference_images, reference_videos, reference_audios):
+                groups.append(await temporary_uploads(uploads))
+            result = await run_in_threadpool(
+                video_service.polish_reference_prompt,
+                prompt,
+                duration,
+                [path for path, _ in groups[0]],
+                [path for path, _ in groups[1]],
+                [path for path, _ in groups[2]],
+                use_video_audio,
+                nsfw,
+                True,  # force_armor（仅非混合路径使用）
+                True,  # hybrid：混合模式专属提示词；破甲由全局 llm.nsfw_armor 开关拼接控制
+            )
+            return {"prompt": result, "model": video_service.VIDEO_MODEL, "mode": "hybrid_to_video"}
+        except HTTPException:
+            raise
+        except Exception as error:
+            logger.exception("hybrid-prompt-polish 全参考润色失败")
+            raise HTTPException(status_code=502, detail=f"混合模式全参考提示词润色失败：{error}")
+        finally:
+            for group in groups:
+                for path, _ in group:
+                    path.unlink(missing_ok=True)
+    paths: list[Path] = []
+    try:
+        for upload in (first_frame, last_frame):
+            path = await temporary_upload(upload)
+            if path:
+                paths.append(path)
+        result = await run_in_threadpool(
+            video_service.polish_prompt, prompt, "hybrid_to_video", duration, paths, nsfw
+        )
+        return {"prompt": result, "model": video_service.VIDEO_MODEL, "mode": "hybrid_to_video"}
+    except HTTPException:
+        raise
+    except Exception as error:
+        logger.exception("hybrid-prompt-polish 润色失败")
+        raise HTTPException(status_code=502, detail=f"混合模式提示词润色失败：{error}")
+    finally:
+        for path in paths:
+            path.unlink(missing_ok=True)
 
 
 async def _create_video_task_impl(
@@ -484,6 +547,190 @@ async def _create_reference_video_task_impl(
         raise HTTPException(status_code=400, detail=str(error))
 
 
+async def _create_hybrid_video_task_impl(
+    prompt: Annotated[str, Form(min_length=1)],
+    duration: Annotated[float, Form(ge=VIDEO_MIN_DURATION, le=VIDEO_MAX_DURATION)] = VIDEO_DEFAULT_DURATION,
+    resolution_megapixels: Annotated[
+        float, Form(ge=VIDEO_MIN_MEGAPIXELS, le=VIDEO_MAX_MEGAPIXELS)
+    ] = VIDEO_DEFAULT_MEGAPIXELS,
+    resolution_preset: Annotated[
+        str, Form(description="分辨率档位：留空走普通工作流（固定 25 步）；hybrid-turbo-8 为 turbo 蒸馏档位（固定 8 步）")
+    ] = "",
+    aspect_ratio: Annotated[
+        str, Form(description="默认 auto：首帧 → 末帧 → 第一张参考图片 → 16:9")
+    ] = "auto",
+    seed: Annotated[int | None, Form()] = None,
+    first_frame: UploadFile | None = File(None),
+    last_frame: UploadFile | None = File(None),
+    ref_image_size: Annotated[str, Form()] = "match",
+    use_video_audio: Annotated[bool, Form()] = True,
+    reference_images: list[UploadFile] = File(default=[]),
+    reference_videos: list[UploadFile] = File(default=[]),
+    reference_audios: list[UploadFile] = File(default=[]),
+    auto_polish: bool = False,
+    owner: str = "admin",
+    nsfw: bool = False,
+):
+    # 混合模式（Dasiwa Hybrid）一个基模同时覆盖 fl2v 与 ref2v 能力：
+    # 有参考素材 → 参考通道（136）；此时首尾帧不再忽略，而是作为关键帧锚定，
+    # 与参考媒体一起构成纯官方节点的“混合参考”（136 + MiniMaxH3AddGuide）。
+    # 无参考素材 → 文本/首尾帧通道（104）。
+    # NSFW 不叠加 LoRA（基模自带能力），nsfw 布尔仅影响润色时是否额外注入风格指南，
+    # 破甲（NSFW 增强）在润色时始终自动打开。
+    first_content = await first_frame.read() if first_frame else None
+    last_content = await last_frame.read() if last_frame else None
+    groups: list[list[tuple[UploadFile, bytes]]] = []
+    for uploads in (reference_images, reference_videos, reference_audios):
+        group = []
+        for upload in uploads:
+            content = await upload.read()
+            if not content:
+                raise HTTPException(status_code=400, detail=f"参考文件 {upload.filename or ''} 不能为空")
+            group.append((upload, content))
+        groups.append(group)
+    has_reference = any(len(group) for group in groups)
+    if has_reference:
+        validate_reference_counts(len(groups[0]), len(groups[1]), len(groups[2]))
+        validate_reference_uploads(reference_images, reference_videos, reference_audios)
+        if ref_image_size not in {"match", "max"}:
+            raise HTTPException(status_code=400, detail="ref_image_size 仅支持 match 或 max")
+    first_ratio = image_ratio(first_content) if first_content else None
+    last_ratio = image_ratio(last_content) if last_content else None
+    first_reference_ratio = image_ratio(groups[0][0][1]) if groups[0] else None
+
+    effective_megapixels, preset_id, turbo = resolve_resolution(
+        resolution_preset, resolution_megapixels, "hybrid_to_video"
+    )
+
+    warnings = []
+    if duration >= 8:
+        warnings.append("时长达到 8 秒或以上，生成时间会很长。")
+    if effective_megapixels > 0.5:
+        warnings.append("分辨率高于 0.5 MP，生成时间会很长。")
+    if has_reference:
+        if first_content or last_content:
+            warnings.append(
+                "已上传参考素材与首尾帧：首尾帧将作为关键帧锚定，与参考媒体共同约束画面。"
+            )
+        if ref_image_size == "max":
+            warnings.append("参考图保真度选择 max，参考 token 会参与每一步采样，生成时间会显著增加。")
+    if first_ratio and last_ratio and abs(first_ratio - last_ratio) / max(first_ratio, last_ratio) > 0.03:
+        warnings.append("首帧与末帧画面比例不一致，生成时会按所选比例居中裁剪。")
+    effective_aspect_ratio, ratio = resolve_aspect_ratio(
+        aspect_ratio, first_ratio, last_ratio, first_reference_ratio
+    )
+    width, height = dimensions(effective_megapixels, ratio)
+    extras = {
+        "nsfw": bool(nsfw),
+        "resolution_preset": preset_id,
+        "_reference_assets": [],
+        **({"original_prompt": prompt.strip()} if auto_polish else {}),
+    }
+    if has_reference:
+        extras.update(
+            {
+                "reference_counts": {
+                    "images": len(groups[0]),
+                    "videos": len(groups[1]),
+                    "audios": len(groups[2]),
+                },
+                "ref_image_size": ref_image_size,
+                "use_video_audio": use_video_audio,
+            }
+        )
+    if turbo:
+        extras["turbo_steps"] = int(turbo["steps"])
+    record = video_service.create_task_record(
+        mode="hybrid_to_video",
+        prompt=prompt.strip(),
+        duration=duration,
+        width=width,
+        height=height,
+        resolution_megapixels=effective_megapixels,
+        aspect_ratio=effective_aspect_ratio,
+        seed=seed,
+        warnings=warnings,
+        owner=owner,
+        extras=extras,
+    )
+    try:
+        if has_reference:
+            for kind, group in zip(("image", "video", "audio"), groups):
+                for index, (upload, content) in enumerate(group, start=1):
+                    video_service.save_reference_asset(
+                        record["id"], kind, index, upload.filename or f"reference_{kind}_{index}", content
+                    )
+        # 首尾帧无论是否上传参考素材都保存：有参考时作为关键帧锚定（混合参考），
+        # 无参考时走 104 文本/首尾帧通道。
+        for name, upload, content in (
+            ("first_frame", first_frame, first_content),
+            ("last_frame", last_frame, last_content),
+        ):
+            if upload and content:
+                video_service.save_input_asset(
+                    record["id"], name, upload.filename or f"{name}.png", content
+                )
+        if auto_polish:
+            video_service.start_polish_and_generation(record["id"])
+        else:
+            video_service.start_generation(record["id"])
+        return video_service.public_task(video_service.load_metadata(record["id"]))
+    except Exception as error:
+        failed = video_service.load_metadata(record["id"])
+        failed.update(status="failed", current_stage="创建任务失败", error=str(error))
+        video_service._save_metadata(failed)
+        raise HTTPException(status_code=400, detail=str(error))
+
+
+@router.post(
+    "/hybrid-tasks",
+    response_model=VideoTaskSummary,
+    status_code=202,
+    tags=[TAG_WORKFLOWS],
+    summary="创建混合生成视频任务（Dasiwa Hybrid）",
+)
+async def create_hybrid_video_task(
+    prompt: Annotated[str, Form(min_length=1)],
+    duration: Annotated[float, Form(ge=VIDEO_MIN_DURATION, le=VIDEO_MAX_DURATION)] = VIDEO_DEFAULT_DURATION,
+    resolution_megapixels: Annotated[
+        float, Form(ge=VIDEO_MIN_MEGAPIXELS, le=VIDEO_MAX_MEGAPIXELS)
+    ] = VIDEO_DEFAULT_MEGAPIXELS,
+    resolution_preset: Annotated[
+        str, Form(description="分辨率档位：留空走普通工作流（固定 25 步）；hybrid-turbo-8 为 turbo 蒸馏档位（固定 8 步）")
+    ] = "",
+    aspect_ratio: Annotated[
+        str, Form(description="默认 auto：首帧 → 末帧 → 第一张参考图片 → 16:9")
+    ] = "auto",
+    seed: Annotated[int | None, Form()] = None,
+    polish_prompt_first: Annotated[
+        bool, Form(description="默认 false 直接生成；true 时先润色提示词再自动生成（混合模式润色自动打开 NSFW 增强）")
+    ] = False,
+    nsfw: Annotated[
+        bool, Form(description="NSFW 开关：仅影响润色时是否额外注入 NSFW 风格指南（破甲始终自动打开）")
+    ] = False,
+    nsfw_strength: Annotated[float, Form(description="已废弃：>0 视为 nsfw=true")] = 0.0,
+    nsfw_native: Annotated[bool, Form(description="已废弃：true 视为 nsfw=true")] = False,
+    ref_image_size: Annotated[str, Form()] = "match",
+    use_video_audio: Annotated[bool, Form()] = True,
+    first_frame: UploadFile | None = File(None),
+    last_frame: UploadFile | None = File(None),
+    reference_images: list[UploadFile] = File(default=[]),
+    reference_videos: list[UploadFile] = File(default=[]),
+    reference_audios: list[UploadFile] = File(default=[]),
+    access: dict = Depends(require_video_access),
+):
+    """Dasiwa Hybrid 基模生成：上传参考素材时走多模态参考通道（首/末帧经官方
+    MiniMaxH3AddGuide 锚定为关键帧，与参考媒体共存），否则走文本/首尾帧通道；
+    25 步普通工作流（Spectrum 跳步加速）或 turbo 蒸馏档位（固定 8 步）二选一。"""
+    return await _create_hybrid_video_task_impl(
+        prompt, duration, resolution_megapixels, resolution_preset, aspect_ratio, seed,
+        first_frame, last_frame, ref_image_size, use_video_audio,
+        reference_images, reference_videos, reference_audios,
+        polish_prompt_first, access["key_id"],
+        _merge_nsfw(nsfw, nsfw_native, nsfw_strength),
+    )
+
+
 @router.post(
     "/tasks",
     response_model=VideoTaskSummary,
@@ -520,15 +767,12 @@ async def create_video_task(
     access: dict = Depends(require_video_access),
 ):
     """直接使用提交的提示词生成；不含图片、仅首帧、仅尾帧、首尾帧共用同一工作流。"""
-    # 历史参数 nsfw_native=true（fl2v 家族）回落为「原生基模」档位（nsfw_preset=native）；
-    # 显式传了 nsfw_preset 时以显式值为准。
+    # 历史参数 nsfw_native=true / nsfw_strength>0 仅视为 nsfw=true（回落默认 LoRA 档位）。
     nsfw_on = _merge_nsfw(nsfw, nsfw_native, nsfw_strength)
-    legacy_native = nsfw_native and not nsfw_preset
     return await _create_video_task_impl(
         prompt, duration, resolution_megapixels, resolution_preset, aspect_ratio, seed,
         first_frame, last_frame, polish_prompt_first, access["key_id"],
-        nsfw_on,
-        nsfw_preset or (video_service.NSFW_NATIVE_PRESET_ID if legacy_native else ""),
+        nsfw_on, nsfw_preset,
     )
 
 
@@ -592,13 +836,20 @@ def parse_task_ids(raw: str) -> list[str]:
 )
 async def get_video_tasks(
     task_ids: Annotated[str, Query(description="浏览器本地保存的任务 ID，使用英文逗号分隔")] = "",
-    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    limit: Annotated[int, Query(ge=1, le=500)] = 20,
+    offset: Annotated[int, Query(ge=0)] = 0,
     access: dict = Depends(require_video_access),
 ):
-    """管理员可查看全部任务；其他身份（API Key / 注册用户）仅能看到自己创建的任务。"""
+    """管理员可查看全部任务；其他身份（API Key / 注册用户）仅能看到自己创建的任务。
+
+    分页返回：``total`` 为过滤后的任务总数，``limit``/``offset`` 回显请求参数，
+    前端据此渲染翻页控件，避免历史任务过多时一次性全量加载。
+    """
     if access["role"] == "admin":
-        return {"tasks": video_service.list_tasks([], limit, include_all=True)}
-    return {"tasks": video_service.list_tasks([], limit, owner=access["key_id"])}
+        tasks, total = video_service.list_tasks_page([], limit, offset, include_all=True)
+    else:
+        tasks, total = video_service.list_tasks_page([], limit, offset, owner=access["key_id"])
+    return {"tasks": tasks, "total": total, "limit": limit, "offset": offset}
 
 
 @router.get(

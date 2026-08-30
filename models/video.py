@@ -4,7 +4,8 @@ from pydantic import BaseModel, Field
 
 
 VideoMode = Literal[
-    "text_to_video", "first_frame", "last_frame", "first_last_frame", "reference_to_video"
+    "text_to_video", "first_frame", "last_frame", "first_last_frame",
+    "reference_to_video", "hybrid_to_video",
 ]
 
 
@@ -50,6 +51,10 @@ class VideoTaskSummary(BaseModel):
 
 class VideoTaskList(BaseModel):
     tasks: list[VideoTaskSummary]
+    # 分页信息：total 为过滤后的任务总数，limit/offset 回显请求的分页参数。
+    total: int = 0
+    limit: int = 0
+    offset: int = 0
 
 
 class VideoQueueStatus(BaseModel):

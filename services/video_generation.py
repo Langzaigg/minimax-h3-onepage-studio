@@ -23,8 +23,9 @@ from config import (
     COMFYUI_AUDIO_VAE,
     COMFYUI_BASE_URL,
     COMFYUI_FL2VA_MODEL,
-    COMFYUI_NSFW_NATIVE_ENABLED,
-    COMFYUI_NSFW_NATIVE_MODEL,
+    COMFYUI_HYBRID_MODEL,
+    COMFYUI_HYBRID_TURBO_MODEL,
+    COMFYUI_INPUT_DIR,
     COMFYUI_REF2VA_MODEL,
     COMFYUI_SPECTRUM_ENABLED,
     COMFYUI_TEXT_ENCODER,
@@ -37,6 +38,18 @@ from config import (
     COMFYUI_TURBO_REF2V_4STEP_SHIFT,
     COMFYUI_VIDEO_VAE,
     FFMPEG_PATH,
+    HYBRID_ENABLED,
+    HYBRID_SAMPLER,
+    HYBRID_SCHEDULER,
+    HYBRID_SHIFT_AUDIO,
+    HYBRID_SHIFT_VIDEO,
+    HYBRID_STEPS,
+    HYBRID_TURBO_ENABLED,
+    HYBRID_TURBO_SAMPLER,
+    HYBRID_TURBO_SCHEDULER,
+    HYBRID_TURBO_SHIFT_AUDIO,
+    HYBRID_TURBO_SHIFT_VIDEO,
+    HYBRID_TURBO_STEPS,
     LLM_NSFW_ARMOR,
     NSFW_PRESETS,
     VIDEO_DATA_FOLDER,
@@ -174,7 +187,11 @@ def _task_owner(data: dict[str, Any]) -> str:
     return str(data.get("_owner") or "admin")
 
 
-def list_tasks(task_ids: list[str], limit: int = 100, include_all: bool = False, owner: str | None = None) -> list[dict[str, Any]]:
+def list_tasks_page(
+    task_ids: list[str], limit: int = 100, offset: int = 0,
+    include_all: bool = False, owner: str | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    """分页返回任务列表（按创建时间倒序），同时返回过滤后的总数，供前端翻页。"""
     rows = list(iter_task_records())
     if include_all:
         filtered = rows
@@ -183,7 +200,12 @@ def list_tasks(task_ids: list[str], limit: int = 100, include_all: bool = False,
     else:
         allowed = {task_id for task_id in task_ids if TASK_ID_RE.fullmatch(task_id)}
         filtered = [item for item in rows if item.get("id") in allowed]
-    return [public_task(item) for item in filtered[:limit]]
+    items = [public_task(item) for item in filtered[offset:offset + limit]]
+    return items, len(filtered)
+
+
+def list_tasks(task_ids: list[str], limit: int = 100, include_all: bool = False, owner: str | None = None) -> list[dict[str, Any]]:
+    return list_tasks_page(task_ids, limit, 0, include_all, owner)[0]
 
 
 def create_task_record(
@@ -401,7 +423,59 @@ _NSFW_GUIDE_TEXT = (
 )
 
 
-def _polish_system(guide: str, task_name: str, ref_mode: bool = False, nsfw: bool = False) -> str:
+def _hybrid_polish_system(guide: str, ref_mode: bool = False) -> str:
+    """混合生成模式（Dasiwa Hybrid，动漫偏向）专属润色系统提示词。
+
+    混合专属内容独立成文，NSFW 内容按全局开关以拼接方式追加：
+    1) 混合参考理解（专属）—— 首尾帧关键帧锚定开场/收尾镜头，多模态参考媒体定义
+       主体身份与美术风格，两者融进一条连贯的制作级提示词；
+    2) 动漫偏向（专属）—— 默认 2D 赛璐璐式美术指导，用户明确指定其他风格时跟随用户；
+    3) NSFW 知识（拼接）—— 配置 llm.nsfw_armor 开启时，拼接 `_NSFW_ARMOR_TEXT`
+       （破甲）与 `_NSFW_GUIDE_TEXT`（成人向风格指南）；关闭则不注入。
+    """
+    task = (
+        "Produce exactly these six English sections in order: subject_definitions, summary, "
+        "retention_analysis, detailed_description, overall_soundscape, non_diegetic_music. Use the "
+        "reference labels exactly in the supplied asset order. Representative video frames and audio "
+        "spectrograms are analysis aids, not extra numbered reference assets. Never invent dialogue or "
+        "lyrics that cannot be verified; write [unclear] when necessary."
+        if ref_mode
+        else "Write one continuous prompt without section headers."
+    )
+    system = (
+        "You are a professional MiniMax H3 prompt editor for the Dasiwa Hybrid base model. "
+        "Rewrite the user's idea in English as a production-ready audiovisual generation prompt. "
+        f"{task}\n"
+        "\n"
+        "MIXED-REFERENCE UNDERSTANDING - this generation can combine first-frame/last-frame "
+        "keyframe anchoring with multimodal reference media in a single shot:\n"
+        "- A provided first frame anchors the opening shot and a provided last frame anchors the "
+        "final shot; describe one continuous motion arc that naturally arrives at each anchored "
+        "keyframe instead of describing the frames themselves.\n"
+        "- Reference media (pictures/videos/audios) define subject identity, art direction, and "
+        "ambience; keep every described visual consistent with them and never describe the assets "
+        "as assets.\n"
+        "- Blend the keyframe and reference constraints into one seamless prompt.\n"
+        "\n"
+        "ANIME-LEANING ART DIRECTION - default to anime/2D stylized output: cel shading, clean "
+        "line art, expressive character acting, vivid yet harmonious palette, and cinematic anime "
+        "camera language (push-ins, parallax, dramatic silhouettes, atmospheric light). If the "
+        "user explicitly requests another art style, follow the user.\n"
+        "\n"
+        "OUTPUT - Preserve user-provided dialogue and visible text verbatim. Return only the final "
+        "prompt, with no code fence or commentary."
+    )
+    # 破甲开关（llm.nsfw_armor）开启时，以拼接方式追加破甲与 NSFW 风格指南。
+    if LLM_NSFW_ARMOR:
+        system += "\n\n" + _NSFW_ARMOR_TEXT
+        system += "\n\n" + _NSFW_GUIDE_TEXT
+    return system + "\n\nPROMPT GUIDE:\n" + guide
+
+
+def _polish_system(
+    guide: str, task_name: str, ref_mode: bool = False, nsfw: bool = False,
+    force_armor: bool = False,
+) -> str:
     role = "full-reference" if ref_mode else "audiovisual"
     system = (
         f"You are a professional MiniMax H3 {role} prompt editor. Rewrite the user's idea in English "
@@ -421,8 +495,8 @@ def _polish_system(guide: str, task_name: str, ref_mode: bool = False, nsfw: boo
     )
     # 破甲提示词（成人向放行）由全局配置 llm.nsfw_armor 单独开关控制；
     # NSFW 风格指南仅在本任务开启 NSFW（nsfw=true）时注入。
-    # 参考模式虽不替换基模，但润色同样注入风格指南。
-    if LLM_NSFW_ARMOR:
+    # 混合生成模式不走本函数，使用独立的 _hybrid_polish_system。
+    if LLM_NSFW_ARMOR or force_armor:
         system += "\n\n" + _NSFW_ARMOR_TEXT
     if nsfw:
         system += "\n\n" + _NSFW_GUIDE_TEXT
@@ -439,8 +513,14 @@ def polish_prompt(
         "first_frame": "I2VA",
         "last_frame": "L2VA",
         "first_last_frame": "FL2VA",
+        # 混合模式（Dasiwa Hybrid）未上传参考素材时，走文本/首尾帧通道。
+        "hybrid_to_video": "FL2VA",
     }[mode]
-    system = _polish_system(guide, task_name, nsfw=nsfw)
+    if mode == "hybrid_to_video":
+        # 混合模式专属独立润色提示词（混合参考理解 + 动漫偏向 + NSFW 知识）。
+        system = _hybrid_polish_system(guide)
+    else:
+        system = _polish_system(guide, task_name, nsfw=nsfw)
     content: list[dict[str, Any]] = [
         {
             "type": "text",
@@ -652,6 +732,8 @@ def polish_reference_prompt(
     audios: list[Path],
     use_video_audio: bool,
     nsfw: bool = False,
+    force_armor: bool = False,
+    hybrid: bool = False,
 ) -> str:
     base_guide = (Path(VIDEO_WORKFLOW_FOLDER) / "VIDEO_PROMPT_WRITING_GUIDE_base_en.md").read_text(
         encoding="utf-8"
@@ -659,7 +741,13 @@ def polish_reference_prompt(
     ref_guide = (Path(VIDEO_WORKFLOW_FOLDER) / "VIDEO_PROMPT_WRITING_GUIDE_ref_en.md").read_text(
         encoding="utf-8"
     )
-    system = _polish_system(base_guide, "full-reference", ref_mode=True, nsfw=nsfw)
+    if hybrid:
+        # 混合模式专属独立润色提示词（混合参考理解 + 动漫偏向 + NSFW 知识）。
+        system = _hybrid_polish_system(base_guide, ref_mode=True)
+    else:
+        system = _polish_system(
+            base_guide, "full-reference", ref_mode=True, nsfw=nsfw, force_armor=force_armor
+        )
     system += "\n\nFULL-REFERENCE GUIDE:\n" + ref_guide
     inventory = [
         f"Target duration: {duration:.2f} seconds",
@@ -793,12 +881,24 @@ if COMFYUI_TURBO_REF2V_4STEP_LORA:
             "shift_video": _shift[0], "shift_audio": _shift[1],
         }
 
+# 混合生成模式（Dasiwa Hybrid）turbo 加速：前端可选开关（类似 NSFW 模式选项），
+# 开启后直接换蒸馏基模（hybrid_turbo_diffusion）固定 8 步采样、不挂 LoRA；
+# 不锁定分辨率（megapixels 跟随用户所选档位，由接口层直接采用请求值）。
+HYBRID_TURBO_PRESETS: dict[str, dict[str, Any]] = {}
+if COMFYUI_HYBRID_TURBO_MODEL:
+    HYBRID_TURBO_PRESETS[f"hybrid-turbo-{HYBRID_TURBO_STEPS}"] = {
+        "diffusion": COMFYUI_HYBRID_TURBO_MODEL, "steps": HYBRID_TURBO_STEPS,
+        "sampler": HYBRID_TURBO_SAMPLER, "scheduler": HYBRID_TURBO_SCHEDULER,
+        "shift_video": HYBRID_TURBO_SHIFT_VIDEO, "shift_audio": HYBRID_TURBO_SHIFT_AUDIO,
+    }
+
 
 def turbo_preset_ids(mode: str) -> list[str]:
     """当前生成模式可用的 turbo 档位 id（按推荐顺序）。"""
-    presets = TURBO_REF2V_PRESETS if mode == "reference_to_video" else TURBO_FL2V_PRESETS
     if mode == "reference_to_video":
         return ["turbo-0.5-4", "turbo-0.5-6", "turbo-0.5-8"]
+    if mode == "hybrid_to_video":
+        return list(HYBRID_TURBO_PRESETS)
     return ["turbo-0.5-6", "turbo-0.5-8", "turbo-1.0-4"]
 
 
@@ -806,8 +906,11 @@ def resolve_turbo_preset(preset: str | None, mode: str) -> dict[str, Any] | None
     """把分辨率档位 id 解析为 turbo 工作流参数；普通档位（空值）返回 None。"""
     if not preset:
         return None
-    presets = TURBO_REF2V_PRESETS if mode == "reference_to_video" else TURBO_FL2V_PRESETS
-    return presets.get(preset)
+    if mode == "reference_to_video":
+        return TURBO_REF2V_PRESETS.get(preset)
+    if mode == "hybrid_to_video":
+        return HYBRID_TURBO_PRESETS.get(preset)
+    return TURBO_FL2V_PRESETS.get(preset)
 
 
 def nsfw_family(mode: str) -> str:
@@ -824,37 +927,21 @@ def nsfw_preset_ids(mode: str) -> list[str]:
     return [preset["id"] for preset in nsfw_presets(mode)]
 
 
-# 特殊 NSFW 档位 id：选中原生 NSFW 基模（替换 UNETLoader 基模，不挂 LoRA），
-# 仅 fl2v 家族（文/首帧/尾帧/首尾帧）可用；与 NSFW LoRA 档位互斥。
-NSFW_NATIVE_PRESET_ID = "native"
-
-
-def nsfw_native_preset() -> dict[str, Any] | None:
-    if not COMFYUI_NSFW_NATIVE_ENABLED:
-        return None
-    return {"id": NSFW_NATIVE_PRESET_ID, "label": "原生基模", "native": True, "loras": []}
-
-
 def resolve_nsfw_preset(
     preset_id: str | None, mode: str, nsfw: bool = True
 ) -> dict[str, Any] | None:
     """把任务参数解析为 NSFW 档位（含该档要叠加的 LoRA 列表）。
 
     - nsfw 关闭 → None；
-    - 特殊档位 "native"（仅 fl2v 家族且已配置原生模型）→ 换基模档位，不挂 LoRA；
     - 开启但未指定档位 → 回落该模式第一个 LoRA 档位（历史任务兼容）；
     - 档位 id 不存在 → None（由接口层转成 400）。
     """
     if not nsfw:
         return None
-    wanted = (preset_id or "").strip()
-    if wanted == NSFW_NATIVE_PRESET_ID:
-        if mode == "reference_to_video":
-            return None
-        return nsfw_native_preset()
     presets = nsfw_presets(mode)
     if not presets:
         return None
+    wanted = (preset_id or "").strip()
     if not wanted:
         return presets[0]
     return next((preset for preset in presets if preset["id"] == wanted), None)
@@ -920,14 +1007,46 @@ def _workflow(
     # （两者叠加会互相破坏采样轨迹）。接口层已拒绝该组合，这里再兜底一次，
     # 以防历史任务记录被手工改成两者同时开启。
     loras: list[dict[str, Any]] = list((nsfw_preset or {}).get("loras") or []) if nsfw else []
-    # 原生基模档位（id=native，仅 fl2v 家族）不挂 LoRA，与 LoRA 档位二选一互斥。
-    native = bool((nsfw_preset or {}).get("native")) if nsfw else False
-    if native and loras:
-        raise ValueError("原生 NSFW 基模与 NSFW LoRA 档位不能同时使用")
-    if native and mode == "reference_to_video":
-        raise ValueError("多模态参考模式不支持原生 NSFW 基模")
     if turbo and loras:
         raise ValueError("NSFW LoRA 与 turbo 加速不能同时使用")
+    if mode == "hybrid_to_video":
+        # 混合生成模式（Dasiwa Hybrid 基模）：一个模型同时覆盖 fl2v（文本/首尾帧）与
+        # ref2v（多模态参考）能力。普通档（Non-Distilled，固定 25 步）串联 Spectrum 加速
+        # 节点跳步；turbo 加速（可选开关）换蒸馏基模固定 8 步、不挂 Spectrum。
+        # conditioning 节点在运行时二选一：有参考素材 → 136（ReferenceToVideo），
+        # 否则 → 104（ImageToVideo，含首尾帧）；模板同时定义两者，_run_generation 裁剪。
+        name = "hybrid_video_turbo_api.json" if turbo else "hybrid_video_api.json"
+        workflow = json.loads((Path(VIDEO_WORKFLOW_FOLDER) / name).read_text(encoding="utf-8"))
+        workflow["6"]["inputs"]["unet_name"] = turbo["diffusion"] if turbo else COMFYUI_HYBRID_MODEL
+        workflow["11"]["inputs"]["vae_name"] = COMFYUI_VIDEO_VAE
+        workflow["24"]["inputs"]["vae_name"] = COMFYUI_AUDIO_VAE
+        workflow["13"]["inputs"]["clip_name"] = COMFYUI_TEXT_ENCODER
+        workflow["104"]["inputs"].update(
+            {"prompt": prompt, "width": width, "height": height, "length": _frame_length(duration)}
+        )
+        workflow["136"]["inputs"].update(
+            {"prompt": prompt, "width": width, "height": height, "length": _frame_length(duration)}
+        )
+        workflow["15"]["inputs"]["noise_seed"] = seed
+        prefix = "video/minimax_h3_studio_hybrid_turbo" if turbo else "video/minimax_h3_studio_hybrid"
+        workflow["92"]["inputs"]["filename_prefix"] = f"{prefix}_{uuid.uuid4().hex}"
+        for node_id in ("3", "4"):
+            workflow[node_id]["inputs"].update(width=width, height=height)
+        if turbo:
+            workflow["123"]["inputs"].update(
+                {"shift_video": turbo["shift_video"], "shift_audio": turbo["shift_audio"]}
+            )
+            workflow["9"]["inputs"].update(steps=turbo["steps"], scheduler=turbo["scheduler"])
+            workflow["17"]["inputs"]["sampler_name"] = turbo["sampler"]
+        else:
+            workflow["123"]["inputs"].update(
+                {"shift_video": HYBRID_SHIFT_VIDEO, "shift_audio": HYBRID_SHIFT_AUDIO}
+            )
+            workflow["9"]["inputs"].update(steps=HYBRID_STEPS, scheduler=HYBRID_SCHEDULER)
+            workflow["17"]["inputs"]["sampler_name"] = HYBRID_SAMPLER
+            # 普通档（25 步）：UNET(6) → SigmaShift(123) → Spectrum(150) → 调度器/引导器。
+            _apply_spectrum(workflow, "123", ["9", "16"], COMFYUI_SPECTRUM_ENABLED)
+        return workflow
     if mode == "reference_to_video":
         # ref2v turbo：三个档位（0.5 的 4/6/8 step）共用同一个 4step 蒸馏 lora；
         # turbo 工作流不挂 Spectrum。普通 ref2v 工作流的 NSFW 档位从节点 144 起串联。
@@ -957,11 +1076,7 @@ def _workflow(
     # fl2v 家族（文/首帧/尾帧/首尾帧）共用一张图；未用到的可选图片分支在末尾裁剪。
     name = "video_turbo_api.json" if turbo else "video_api.json"
     workflow = json.loads((Path(VIDEO_WORKFLOW_FOLDER) / name).read_text(encoding="utf-8"))
-    # fl2v 基模：选中「原生基模」档位（native）时替换为原生 NSFW 模型，否则保持常规基模。
-    # 原生基模档位不挂 LoRA（与 NSFW LoRA 档位互斥），因此仍可与 turbo 蒸馏 lora 组合。
-    workflow["6"]["inputs"]["unet_name"] = (
-        COMFYUI_NSFW_NATIVE_MODEL if native else COMFYUI_FL2VA_MODEL
-    )
+    workflow["6"]["inputs"]["unet_name"] = COMFYUI_FL2VA_MODEL
     if turbo:
         # turbo：UNET(6) → 蒸馏 Lora(122) → SigmaShift(123) → Scheduler/Guider；
         # 步数直接写 steps，不跳步；不挂 Spectrum。
@@ -1001,11 +1116,55 @@ def _frame_length(duration: float) -> int:
     return raw + (5 - raw % 17) % 17
 
 
+def _hybrid_keyframe_chain(workflow: dict, frame_count: int, first_connected: bool, last_connected: bool) -> list:
+    """混合参考：把首/末帧 LoadImage 节点（1/2）锚定为关键帧。
+
+    用官方 MiniMaxH3AddGuide 节点把首/末帧追加进 minimax_keyframes，与 136
+    （ReferenceToVideo）的 minimax_refs 共存 —— 官方模型后端原生支持 keyframes
+    与 refs 混合布局（extra_conds 同时消费两者），因此无需任何第三方节点即可
+    实现“参考媒体 + 关键帧”的混合参考。返回最终 conditioning 引用（["136",0] /
+    ["160",0] / ["161",0]）。
+    """
+    guide_chain: list = ["136", 0]
+    if first_connected:
+        workflow["160"] = {
+            "class_type": "MiniMaxH3AddGuide",
+            "inputs": {
+                "positive": guide_chain,
+                "vae": ["11", 0],
+                "latent": ["136", 1],
+                "image": ["1", 0],
+                "frame_idx": 0,
+            },
+        }
+        guide_chain = ["160", 0]
+    else:
+        workflow.pop("1", None)
+    if last_connected:
+        workflow["161"] = {
+            "class_type": "MiniMaxH3AddGuide",
+            "inputs": {
+                "positive": guide_chain,
+                "vae": ["11", 0],
+                "latent": ["136", 1],
+                "image": ["2", 0],
+                "frame_idx": frame_count - 1,
+            },
+        }
+        guide_chain = ["161", 0]
+    else:
+        workflow.pop("2", None)
+    return guide_chain
+
+
 class ComfyClient:
     def __init__(self):
         self.base_url = COMFYUI_BASE_URL.rstrip("/")
         self.session = requests.Session()
         self.session.trust_env = False
+        # 记录本次会话上传到 ComfyUI input 的文件名（可能带 subfolder 前缀），
+        # 生成结束后由 cleanup_comfyui_uploads 统一删除，避免 input 目录长期堆积。
+        self.uploaded_files: list[str] = []
 
     def upload_file(self, path: Path) -> str:
         remote_name = f"minimax_h3_studio_{uuid.uuid4().hex}{path.suffix.lower() or '.png'}"
@@ -1018,7 +1177,9 @@ class ComfyClient:
             )
         response.raise_for_status()
         body = response.json()
-        return "/".join(part for part in [body.get("subfolder"), body["name"]] if part)
+        remote = "/".join(part for part in [body.get("subfolder"), body["name"]] if part)
+        self.uploaded_files.append(remote)
+        return remote
 
     def upload_image(self, path: Path) -> str:
         return self.upload_file(path)
@@ -1056,6 +1217,28 @@ class ComfyClient:
                         target.write(chunk)
 
 
+def cleanup_comfyui_uploads(client: "ComfyClient") -> None:
+    """删除本次生成上传到 ComfyUI input 目录的临时副本。
+
+    首帧/末帧与参考媒体在上传时以 minimax_h3_studio_* 随机名复制进 ComfyUI 的
+    input 目录，此前生成结束后不清理，长期累积成大量垃圾文件。配置了
+    comfyui.input_dir 后在生成任务收尾（无论成功或失败）时统一删除；
+    删除失败静默忽略——文件名含 uuid 不会冲突，不影响生成流程。
+    """
+    if not COMFYUI_INPUT_DIR:
+        return
+    input_root = Path(COMFYUI_INPUT_DIR)
+    for remote in list(getattr(client, "uploaded_files", [])):
+        parts = Path(remote).parts
+        if not parts or any(part in ("..",) for part in parts):
+            continue  # 防目录穿越：只允许 input 目录内的相对路径
+        try:
+            input_root.joinpath(*parts).unlink(missing_ok=True)
+        except OSError:
+            pass
+    client.uploaded_files.clear()
+
+
 def start_generation(task_id: str) -> None:
     job = asyncio.create_task(_run_generation(task_id))
     _background_tasks.add(job)
@@ -1076,7 +1259,12 @@ async def _polish_then_generate(task_id: str) -> None:
         data = load_metadata(task_id)
         original_prompt = data.get("original_prompt") or data["prompt"]
         nsfw = task_nsfw_enabled(data)
-        if data["mode"] == "reference_to_video":
+        mode = data["mode"]
+        # 混合模式（Dasiwa Hybrid）有参考素材时走全参考润色（六段式），否则走普通润色；
+        # 混合模式使用专属润色提示词（混合参考理解 + 动漫偏向），破甲与 NSFW 风格指南
+        # 由全局 llm.nsfw_armor 开关控制拼接。
+        hybrid = mode == "hybrid_to_video"
+        if mode == "reference_to_video" or (hybrid and data.get("_reference_assets")):
             grouped = {"image": [], "video": [], "audio": []}
             for item in data.get("_reference_assets", []):
                 grouped[item["kind"]].append((int(item["index"]), Path(item["path"])))
@@ -1089,6 +1277,8 @@ async def _polish_then_generate(task_id: str) -> None:
                 [path for _, path in sorted(grouped["audio"])],
                 data.get("use_video_audio", True),
                 nsfw,
+                force_armor=hybrid,
+                hybrid=hybrid,
             )
         else:
             images = [
@@ -1097,7 +1287,7 @@ async def _polish_then_generate(task_id: str) -> None:
                 if name in data.get("_assets", {})
             ]
             polished = await asyncio.to_thread(
-                polish_prompt, original_prompt, data["mode"], data["duration"], images, nsfw,
+                polish_prompt, original_prompt, mode, data["duration"], images, nsfw,
             )
         data = load_metadata(task_id)
         data.update(
@@ -1130,7 +1320,42 @@ async def _run_generation(task_id: str) -> None:
             ),
             turbo=resolve_turbo_preset(data.get("resolution_preset"), data["mode"]),
         )
-        if data["mode"] == "reference_to_video":
+        if data["mode"] == "reference_to_video" or (
+            data["mode"] == "hybrid_to_video" and data.get("_reference_assets")
+        ):
+            if data["mode"] == "hybrid_to_video":
+                # 混合模式有参考素材：采样链改接 136（ReferenceToVideo），移除未使用的
+                # 104（ImageToVideo）。首/末帧若已上传则保留其 LoadImage 节点（1/2），
+                # 通过官方 MiniMaxH3AddGuide 节点锚定为关键帧（minimax_keyframes）——
+                # 官方模型后端原生支持 keyframes 与 refs（minimax_refs）共存，因此
+                # 无需任何第三方节点即可实现“参考媒体 + 关键帧”混合参考；
+                # 3/4 号 ImageScale 不使用（AddGuide 内部按画布 resize）。
+                workflow["14"]["inputs"]["latent_image"] = ["136", 1]
+                workflow.pop("104", None)
+                workflow.pop("3", None)
+                workflow.pop("4", None)
+                frame_count = _frame_length(data["duration"])
+                has_first = "first_frame" in data["_assets"]
+                has_last = "last_frame" in data["_assets"]
+                if has_first:
+                    first_source = _downscale_image(Path(data["_assets"]["first_frame"]), H3_IMAGE_MAX_SIDE)
+                    try:
+                        first_name = await asyncio.to_thread(client.upload_image, first_source)
+                    finally:
+                        if first_source != Path(data["_assets"]["first_frame"]):
+                            first_source.unlink(missing_ok=True)
+                    workflow["1"]["inputs"]["image"] = first_name
+                if has_last:
+                    last_source = _downscale_image(Path(data["_assets"]["last_frame"]), H3_IMAGE_MAX_SIDE)
+                    try:
+                        last_name = await asyncio.to_thread(client.upload_image, last_source)
+                    finally:
+                        if last_source != Path(data["_assets"]["last_frame"]):
+                            last_source.unlink(missing_ok=True)
+                    workflow["2"]["inputs"]["image"] = last_name
+                workflow["16"]["inputs"]["conditioning"] = _hybrid_keyframe_chain(
+                    workflow, frame_count, has_first, has_last
+                )
             workflow["136"]["inputs"]["ref_image_size"] = data.get("ref_image_size", "match")
             for item in data.get("_reference_assets", []):
                 source = Path(item["path"])
@@ -1173,6 +1398,34 @@ async def _run_generation(task_id: str) -> None:
                     node_id = f"ref_audio_load_{index}"
                     workflow[node_id] = {"class_type": "LoadAudio", "inputs": {"audio": remote_name}}
                     workflow["136"]["inputs"][f"ref_audios.ref_audio_{index}"] = [node_id, 0]
+        elif data["mode"] == "hybrid_to_video":
+            # 混合模式无参考素材：走 104（ImageToVideo，支持文本/首尾帧），移除 136。
+            workflow.pop("136", None)
+            if "first_frame" in data["_assets"]:
+                first_source = _downscale_image(Path(data["_assets"]["first_frame"]), H3_IMAGE_MAX_SIDE)
+                try:
+                    first_name = await asyncio.to_thread(client.upload_image, first_source)
+                finally:
+                    if first_source != Path(data["_assets"]["first_frame"]):
+                        first_source.unlink(missing_ok=True)
+                workflow["1"]["inputs"]["image"] = first_name
+            if "last_frame" in data["_assets"]:
+                last_source = _downscale_image(Path(data["_assets"]["last_frame"]), H3_IMAGE_MAX_SIDE)
+                try:
+                    last_name = await asyncio.to_thread(client.upload_image, last_source)
+                finally:
+                    if last_source != Path(data["_assets"]["last_frame"]):
+                        last_source.unlink(missing_ok=True)
+                workflow["2"]["inputs"]["image"] = last_name
+            # 裁剪未使用的首尾帧分支（与 fl2v 家族一致）。
+            if "first_frame" not in data["_assets"]:
+                workflow.pop("1")
+                workflow.pop("3")
+                workflow["104"]["inputs"].pop("first_frame")
+            if "last_frame" not in data["_assets"]:
+                workflow.pop("2")
+                workflow.pop("4")
+                workflow["104"]["inputs"].pop("last_frame")
         elif "first_frame" in data["_assets"]:
             first_source = _downscale_image(Path(data["_assets"]["first_frame"]), H3_IMAGE_MAX_SIDE)
             try:
@@ -1181,7 +1434,7 @@ async def _run_generation(task_id: str) -> None:
                 if first_source != Path(data["_assets"]["first_frame"]):
                     first_source.unlink(missing_ok=True)
             workflow["1"]["inputs"]["image"] = first_name
-        if data["mode"] != "reference_to_video" and "last_frame" in data["_assets"]:
+        if data["mode"] not in ("reference_to_video", "hybrid_to_video") and "last_frame" in data["_assets"]:
             last_source = _downscale_image(Path(data["_assets"]["last_frame"]), H3_IMAGE_MAX_SIDE)
             try:
                 last_name = await asyncio.to_thread(client.upload_image, last_source)
@@ -1209,6 +1462,10 @@ async def _run_generation(task_id: str) -> None:
         data = load_metadata(task_id)
         data.update(status="failed", current_stage="生成失败", error=_public_error(error), queue_position=None)
         _save_metadata(data)
+    finally:
+        # 生成结束（成功或失败）后清理本次上传到 ComfyUI input 的临时副本，
+        # 避免 minimax_h3_studio_* 图片/视频副本在 input 目录无限堆积。
+        cleanup_comfyui_uploads(client)
 
 
 async def _watch_websocket(task_id: str, prompt_id: str, websocket, client: ComfyClient) -> None:
@@ -1228,8 +1485,9 @@ async def _watch_websocket(task_id: str, prompt_id: str, websocket, client: Comf
             elif kind == "executing" and payload.get("node"):
                 node = str(payload["node"])
                 # 解析阶段完成即到 10%：解析提示词与参考帧(104)、多模态参考(136)、
-                # 应用采样加速(150) 都在 10% 汇合；之后采样 progress 事件从 10% 起步推进到 90%。
-                stage_base = {"104": 10, "136": 10, "150": 10}.get(node)
+                # 关键帧锚定(160/161 MiniMaxH3AddGuide)、应用采样加速(150) 都在 10% 汇合；
+                # 之后采样 progress 事件从 10% 起步推进到 90%。
+                stage_base = {"104": 10, "136": 10, "150": 10, "160": 10, "161": 10}.get(node)
                 # 采样完成后的收尾阶段（解码/封装/保存）从 90% 继续推进到 98%，避免进度条长时间停滞。
                 tail_base = {"10": 92, "23": 94, "91": 96, "92": 98}.get(node)
                 base = stage_base if stage_base is not None else tail_base
@@ -1351,6 +1609,7 @@ def video_output_filename(task_id: str, data: dict[str, Any], suffix: str = ".mp
         "last_frame": "last_frame",
         "first_last_frame": "first_last_frame",
         "reference_to_video": "reference_to_video",
+        "hybrid_to_video": "hybrid_to_video",
     }.get(data.get("mode"), "video")
     safe_suffix = suffix.lower() if suffix.lower() in {".mp4", ".webm", ".mov", ".mkv"} else ".mp4"
     return f"AI_Video_{mode_label}_{date_label}_{task_id[:8]}{safe_suffix}"
@@ -1516,7 +1775,10 @@ def _remove_tree(target: Path, attempts: int = 5) -> None:
 
     不使用 shutil.rmtree：Windows 上文件可能被杀软瞬时锁定（WinError 5），
     逐文件删除配合重试更稳健，也能避免部分环境对 rmtree 的回收站拦截。
+    某些运行环境会给 os.remove 注入安全垫片并抛 SystemExit 一类控制流异常，
+    这里统一转换为 RuntimeError，避免线程池中的删除失败拖垮整个服务进程。
     """
+    last_error: BaseException | None = None
     for attempt in range(attempts):
         try:
             for root, dirs, files in os.walk(str(target), topdown=False):
@@ -1526,10 +1788,14 @@ def _remove_tree(target: Path, attempts: int = 5) -> None:
                     os.rmdir(os.path.join(root, name))
             os.rmdir(str(target))
             return
-        except OSError:
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            raise
+        except BaseException as error:  # noqa: BLE001 - 见 docstring
+            last_error = error
             if attempt == attempts - 1:
-                raise
+                break
             time.sleep(0.05 * (attempt + 1))
+    raise RuntimeError(f"删除目录失败：{target.name}（{last_error}）") from last_error
 
 
 def delete_task_record(task_id: str) -> None:
@@ -1558,6 +1824,6 @@ def cleanup_expired_video_tasks(retention_days: int = 90) -> int:
             try:
                 delete_task_record(data["id"])
                 removed += 1
-            except (OSError, ValueError, FileNotFoundError):
+            except (OSError, RuntimeError, ValueError, FileNotFoundError):
                 continue
     return removed
