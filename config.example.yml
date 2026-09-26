@@ -1,4 +1,4 @@
-# MiniMax H3 视频服务配置模板
+# Qwen → MiniMax H3 → 高清后处理工作台配置模板
 # 用法：复制本文件为 config.yml 后按需修改（config.yml 已被 .gitignore 忽略，不会提交）。
 # 所有配置（含 API Key、管理员密钥、本机 ffmpeg 路径等私有项）统一写入 config.yml。
 
@@ -26,34 +26,24 @@ comfyui:
   models:
     fl2va_diffusion: "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
     ref2va_diffusion: "minimax_h3_ref2va_pruned_int8_convrot.safetensors"
-    # Dasiwa 混合基模（fl2v + ref2v 合一）：「混合生成」独立模式。
-    # hybrid_diffusion = 20 步版本（Non-Distilled，配 Spectrum 加速跳步）；
-    # hybrid_turbo_diffusion = 蒸馏版本（Distilled，4/8 步不跳步）。
-    # 文件名留空（""）则禁用对应档位（hybrid_diffusion 为空时整个混合模式不出现）。
-    hybrid_diffusion: "DasiwaMinimaxH3_dasiwaHybridV1.safetensors"
-    hybrid_turbo_diffusion: "DasiwaMinimaxH3_dasiwaHybrid8turboV1.safetensors"
+    # 综合标签页的两个独立档位，均支持首尾帧与多模态参考。
+    # anime：Dasiwa Hybrid v2 非蒸馏版，默认完整 25 步。
+    # nsfw：Eros beta5 已内置 Turbo，默认 8 步，不再叠加 Turbo LoRA。
+    hybrid_diffusion: "DasiwaMinimaxH3_dasiwaHybridV2_int8.safetensors"
+    hybrid_nsfw_diffusion: "ErosMax_H3_beta5_Turbo_INT8.safetensors"
+    # 可选旧版动漫 Turbo 档；文件名留空即隐藏，仅 anime 可选。
+    hybrid_turbo_diffusion: ""
     text_encoder: "qwen3vl_32b_minimax_h3_int8_convrot.safetensors"
     video_vae: "minimax_h3_video_vae_fp16.safetensors"
     audio_vae: "minimax_h3_audio_vae_fp32.safetensors"
-  # NSFW LoRA 配方：每档可叠加多个 LoRA，按配置顺序串联在基模之后。
-  # 与「原生基模」档位二选一互斥；与 turbo 加速互斥（选中 LoRA 档位后 turbo 档位不可用）。
-  # 未配置任何档位时该模式不渲染 NSFW 下拉，接口传 nsfw=true 返回 400。
-  # fl2v = 文生视频 / 首帧 / 尾帧 / 首尾帧；ref2v = 多模态参考生成。
+  # 旧 FL2V / Ref2V 的 NSFW LoRA 配方已退役，保留空列表兼容历史配置。
+  # 新的 NSFW 特调使用综合模式的 Eros Hybrid，不依赖这些 LoRA。
+  # 空列表时隐藏旧下拉，接口传旧 nsfw=true 返回 400；普通模式及 Turbo 保留。
   nsfw:
-    fl2v_presets: []   # 例：
-    # - id: "aio"
-    #   label: "AIO 1.0"
-    #   loras:
-    #     - {lora: "HMNSFW-AIO-V2.5.safetensors", strength: 1.0}
-    # - id: "aio-vagina"
-    #   label: "AIO 0.65 + Vagina 0.35"
-    #   loras:
-    #     - {lora: "HMNSFW-AIO-V2.5.safetensors", strength: 0.65}
-    #     - {lora: "Vagina_minimax-h3_epoch20.safetensors", strength: 0.35}
-    ref2v_presets: []  # 例：- {id: "aftermidnight", label: "AfterMidnight 1.0",
-    #        loras: [{lora: "AfterMidnight_ref2va_h3_sexytime_rank64-v1.2.safetensors", strength: 1.0}]}
+    fl2v_presets: []
+    ref2v_presets: []
   # 采样加速（Spectrum Apply MiniMax H3），默认不启用；启用需在 ComfyUI 安装对应自定义节点；
-  # turbo 工作流不使用该节点。
+  # turbo 工作流和综合模式两个新档位均不使用该节点。
   spectrum_apply:
     enabled: false
   # Turbo 蒸馏 Lora（lightx2v）：fl2v 档位（文/首帧/尾帧/首尾帧共享）与 ref2v 档位（多模态参考）。
@@ -67,10 +57,10 @@ comfyui:
     fl2v_4step_shift: "6,3"
     ref2v_4step_lora: ""
     ref2v_4step_shift: "12,3"
-  # 混合模式（Dasiwa Hybrid）采样参数：
+  # 综合模式采样参数（参考图保真优先，两个档位均不挂 Spectrum）：
   # 普通档（Non-Distilled）：推荐 res_multistep/simple 或 euler/simple，
-  #   Shift Video 10-12、Shift Audio 3-5；默认固定 25 步，配合 Spectrum 加速节点跳步。
-  # turbo 加速（Distilled，前端可选开关）：固定 8 步直接采样、不挂 Spectrum，
+  #   Shift Video 10-12、Shift Audio 3-5；默认完整 25 步。
+  # 旧版动漫 turbo 加速（Distilled，前端可选开关）：固定 8 步直接采样，
   #   分辨率跟随用户所选档位。
   hybrid:
     steps: 25
@@ -83,15 +73,25 @@ comfyui:
     turbo_scheduler: "simple"
     turbo_shift_video: 12
     turbo_shift_audio: 3
+    # Eros 作者建议 res_multistep/simple 6–9 步；8 步兼顾运动与速度。
+    # 下列 shift 是本工作台沿用的 H3 起点，非作者发布的 beta5 专属定值。
+    nsfw_steps: 8
+    nsfw_sampler: "res_multistep"
+    nsfw_scheduler: "simple"
+    nsfw_shift_video: 12
+    nsfw_shift_audio: 3
 
 llm:
-  base_url: "http://127.0.0.1:8000/v1"
-  api_key: ""
-  model: "kimi-k2.7-code"
+  base_url: "https://api.commandcode.ai/provider/v1"
+  # 在未提交的 config.yml 中填写 api_keys；也可设置 LLM_API_KEY 环境变量。
+  # api_keys 使用首个非空密钥；不要同时保留空的 api_key 字段。
+  api_keys: []
+  model: "moonshotai/Kimi-K2.7-Code"
   # 思考模式力度：low / medium / high；留空（""）则不发送 reasoning_effort，
   # 并回退为 chat_template_kwargs.enable_thinking=false（本地 vLLM 风格部署）。
   reasoning_effort: "low"
   timeout_seconds: 180
+  max_output_tokens: 4096
   context_window: 131000
   context_margin_tokens: 512
   min_completion_tokens: 512

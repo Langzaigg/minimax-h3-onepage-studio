@@ -12,6 +12,12 @@ def configure_access_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(access_control, "STATS_PATH", tmp_path / "usage_stats.json")
 
 
+def test_unicode_username_does_not_crash_admin_secret_check(monkeypatch):
+    monkeypatch.setattr(access_control, "SERVICE_ADMIN_KEY", "admin-secret")
+    assert not access_control.is_admin_secret("工作台验证")
+    assert access_control.is_admin_secret("admin-secret")
+
+
 def test_admin_mode_allows_direct_access_without_credentials(tmp_path, monkeypatch):
     """admin 模式（默认）：无需任何凭据即可直接以管理员身份访问，管理控制台同样可用。"""
     configure_access_paths(tmp_path, monkeypatch)

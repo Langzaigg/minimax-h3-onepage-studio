@@ -136,7 +136,7 @@ def verify_api_key(secret: str, touch: bool = True) -> dict[str, Any] | None:
 
 
 def is_admin_secret(secret: str | None) -> bool:
-    return hmac.compare_digest(secret or "", SERVICE_ADMIN_KEY)
+    return hmac.compare_digest((secret or "").encode("utf-8"), SERVICE_ADMIN_KEY.encode("utf-8"))
 
 
 def _users_store() -> dict:

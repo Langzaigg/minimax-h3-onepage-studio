@@ -1,0 +1,2 @@
+# Preserve archived document bytes so their SHA256 manifest survives checkout.
+docs/history/*-before-*.md -text whitespace=cr-at-eol

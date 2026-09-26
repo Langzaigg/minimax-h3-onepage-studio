@@ -1,0 +1,14 @@
+[
+  {
+    "source": "D:\\ComfyUI_windows_portable\\minimax-h3-onepage-studio\\README.md",
+    "snapshot": "D:\\ComfyUI_windows_portable\\minimax-h3-onepage-studio\\docs\\history\\README-before-20260926-final-ui.md",
+    "sha256": "bdf94ede03b6c423d9af843ed367b09de01624beea1fb3719deeb9b6520ef545",
+    "bytes": 32347
+  },
+  {
+    "source": "D:\\ComfyUI_windows_portable\\minimax-h3-onepage-studio\\PIPELINE_GUIDE.md",
+    "snapshot": "D:\\ComfyUI_windows_portable\\minimax-h3-onepage-studio\\docs\\history\\PIPELINE_GUIDE-before-20260926-final-ui.md",
+    "sha256": "fd756c6e1bbd61c5ae71b6f467b55b3a73de7ebd78a83f92c03a160ce46175ad",
+    "bytes": 35462
+  }
+]

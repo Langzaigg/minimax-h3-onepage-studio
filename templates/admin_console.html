@@ -2,13 +2,14 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>管理员控制台</title>
+  <title>管理 · 兔酱拍片工作室</title>
+  <link rel="icon" href="/static/img/tujang-studio.svg" type="image/svg+xml">
   <style>
     :root{--ink:#182230;--muted:#667085;--line:#dbe1ea;--brand:#3157d5;--bad:#bd313c;--bg:#f3f5f8}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.55 "Segoe UI","Microsoft YaHei",sans-serif}header{height:64px;background:#fff;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 28px}header h1{font-size:19px;margin:0}header a{color:var(--muted);text-decoration:none}main{max-width:1240px;margin:auto;padding:24px}.card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:22px;margin-bottom:18px}.head{display:flex;justify-content:space-between;align-items:center;gap:12px}.head h2{margin:0}.sub{color:var(--muted)}.form-grid,.filters{display:grid;grid-template-columns:2fr 1fr 1fr auto;gap:10px;align-items:end;margin:18px 0}label{display:block;font-weight:600;margin-bottom:6px}input,select{width:100%;padding:10px;border:1px solid #cdd5df;border-radius:7px;font:inherit}button{border:0;border-radius:7px;padding:10px 14px;font-weight:600;cursor:pointer}.primary{background:var(--brand);color:#fff}.secondary{background:#edf1ff;color:var(--brand)}.danger{background:#fff0f1;color:var(--bad)}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:10px;border-bottom:1px solid #edf0f4;vertical-align:top}th{color:var(--muted);font-size:12px}.key{font:12px Consolas,monospace;word-break:break-all;max-width:410px}.badge{display:inline-block;padding:3px 7px;border-radius:99px;background:#eaf8f1;color:#137452}.badge.off{background:#f5f0f0;color:#a0343d}.chart-wrap{height:390px;border:1px solid var(--line);border-radius:8px;padding:12px;margin:16px 0}canvas{width:100%;height:100%}.empty{text-align:center;color:var(--muted);padding:30px}.toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#172033;color:#fff;padding:10px 15px;border-radius:8px}.hidden{display:none!important}@media(max-width:800px){.form-grid,.filters{grid-template-columns:1fr}.table-wrap{overflow:auto}main{padding:12px}}
   </style>
 </head>
 <body>
-<header><h1>管理员控制台</h1><a href="/video-generate">← 返回视频创作</a></header>
+<header><h1>管理员控制台</h1><a href="/video-generate">← 兔酱拍片工作室</a></header>
 <main>
   <section class="card" id="keys"><div class="head"><div><h2>API Key 管理</h2><div class="sub">完整密钥保存在本机；管理员可持续查看和复制。</div></div><button class="secondary" id="refresh-keys">刷新</button></div>
     <form class="form-grid" id="create-form"><div><label>Key 名称</label><input id="key-name" maxlength="80" placeholder="例如：视频制作组" required></div><div><label>生效时长</label><input id="key-duration" type="number" min="1" value="30" required></div><div><label>单位</label><select id="duration-unit"><option value="24">天</option><option value="1">小时</option><option value="720">月（30天）</option></select></div><button class="primary" type="submit">创建 Key</button></form>

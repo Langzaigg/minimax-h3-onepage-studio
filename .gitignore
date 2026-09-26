@@ -2,6 +2,9 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .pytest_tmp/
+.pytest_tmp_*/
+.pytest_postprocessing_tmp/
+.pytest_nr_ada/
 .venv/
 venv/
 

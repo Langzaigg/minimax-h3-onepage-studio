@@ -24,6 +24,7 @@ from config import (
     COMFYUI_BASE_URL,
     COMFYUI_FL2VA_MODEL,
     COMFYUI_HYBRID_MODEL,
+    COMFYUI_HYBRID_NSFW_MODEL,
     COMFYUI_HYBRID_TURBO_MODEL,
     COMFYUI_INPUT_DIR,
     COMFYUI_REF2VA_MODEL,
@@ -39,6 +40,11 @@ from config import (
     COMFYUI_VIDEO_VAE,
     FFMPEG_PATH,
     HYBRID_ENABLED,
+    HYBRID_NSFW_SAMPLER,
+    HYBRID_NSFW_SCHEDULER,
+    HYBRID_NSFW_SHIFT_AUDIO,
+    HYBRID_NSFW_SHIFT_VIDEO,
+    HYBRID_NSFW_STEPS,
     HYBRID_SAMPLER,
     HYBRID_SCHEDULER,
     HYBRID_SHIFT_AUDIO,
@@ -114,9 +120,23 @@ def load_metadata(task_id: str) -> dict[str, Any]:
     return json.loads(metadata_path(task_id).read_text(encoding="utf-8"))
 
 
-def public_task(data: dict[str, Any]) -> dict[str, Any]:
-    ensure_named_video_asset(data)
+def public_task(data: dict[str, Any], *, migrate_assets: bool = True) -> dict[str, Any]:
+    if migrate_assets:
+        ensure_named_video_asset(data)
     result = {key: value for key, value in data.items() if not key.startswith("_")}
+    result["seed_text"] = str(data["seed"]) if data.get("seed") is not None else ""
+    result.setdefault("target_resolution", "1080p")
+    result.setdefault("source_resolution_profile", "")
+    result.setdefault("auto_postprocess", False)
+    result.setdefault("auto_postprocess_task_id", None)
+    result.setdefault("auto_postprocess_error", None)
+    if data.get("auto_postprocess_task_id"):
+        from services.auto_postprocess import linked_error
+        result["auto_postprocess_error"] = linked_error(data)
+    result.setdefault("sampling_width", data.get("width"))
+    result.setdefault("sampling_height", data.get("height"))
+    if data.get("mode") == "hybrid_to_video":
+        result.setdefault("hybrid_preset", "anime")
     assets: dict[str, str] = {}
     for name in data.get("_assets", {}):
         if name in ASSET_NAMES or REFERENCE_ASSET_RE.fullmatch(name):
@@ -517,10 +537,18 @@ def polish_prompt(
         "hybrid_to_video": "FL2VA",
     }[mode]
     if mode == "hybrid_to_video":
+        task_name = ("T2VA" if not images else "FL2VA" if len(images) > 1
+                     else "L2VA" if "last" in images[0].stem.lower() else "I2VA")
+    if mode == "hybrid_to_video":
         # 混合模式专属独立润色提示词（混合参考理解 + 动漫偏向 + NSFW 知识）。
         system = _hybrid_polish_system(guide)
     else:
         system = _polish_system(guide, task_name, nsfw=nsfw)
+    system += (
+        "\nOnly refer to the images actually attached to this request. "
+        "Never invent Picture 2 or a last-frame reference when there is only one image. "
+        "Preserve the user's composition, empty title area, and requested absence of text."
+    )
     content: list[dict[str, Any]] = [
         {
             "type": "text",
@@ -884,13 +912,45 @@ if COMFYUI_TURBO_REF2V_4STEP_LORA:
 # 混合生成模式（Dasiwa Hybrid）turbo 加速：前端可选开关（类似 NSFW 模式选项），
 # 开启后直接换蒸馏基模（hybrid_turbo_diffusion）固定 8 步采样、不挂 LoRA；
 # 不锁定分辨率（megapixels 跟随用户所选档位，由接口层直接采用请求值）。
-HYBRID_TURBO_PRESETS: dict[str, dict[str, Any]] = {}
-if COMFYUI_HYBRID_TURBO_MODEL:
-    HYBRID_TURBO_PRESETS[f"hybrid-turbo-{HYBRID_TURBO_STEPS}"] = {
+def _hybrid_turbo_presets() -> dict[str, dict[str, Any]]:
+    # Resolve from the current optional model choice, rather than an import-time
+    # snapshot that can remain empty after the legacy checkpoint is configured.
+    if not COMFYUI_HYBRID_TURBO_MODEL:
+        return {}
+    return {f"hybrid-turbo-{HYBRID_TURBO_STEPS}": {
         "diffusion": COMFYUI_HYBRID_TURBO_MODEL, "steps": HYBRID_TURBO_STEPS,
         "sampler": HYBRID_TURBO_SAMPLER, "scheduler": HYBRID_TURBO_SCHEDULER,
         "shift_video": HYBRID_TURBO_SHIFT_VIDEO, "shift_audio": HYBRID_TURBO_SHIFT_AUDIO,
-    }
+    }}
+
+
+def hybrid_presets() -> list[dict[str, Any]]:
+    """Public model choices. The legacy NSFW flag never selects a checkpoint."""
+    choices = [
+        {
+            "id": "anime", "label": "动画特调 · DaSiWa Hybrid v2",
+            "model": COMFYUI_HYBRID_MODEL, "steps": HYBRID_STEPS,
+            "sampler": HYBRID_SAMPLER, "scheduler": HYBRID_SCHEDULER,
+            "shift_video": HYBRID_SHIFT_VIDEO, "shift_audio": HYBRID_SHIFT_AUDIO,
+            "distilled": False, "cfg": 1.0, "spectrum_enabled": False,
+        },
+        {
+            "id": "nsfw", "label": "NSFW 特调 · Eros Max beta5",
+            "model": COMFYUI_HYBRID_NSFW_MODEL, "steps": HYBRID_NSFW_STEPS,
+            "sampler": HYBRID_NSFW_SAMPLER, "scheduler": HYBRID_NSFW_SCHEDULER,
+            "shift_video": HYBRID_NSFW_SHIFT_VIDEO, "shift_audio": HYBRID_NSFW_SHIFT_AUDIO,
+            "distilled": True, "cfg": 1.0, "spectrum_enabled": False,
+        },
+    ]
+    return [item for item in choices if item["model"]]
+
+
+def resolve_hybrid_preset(preset_id: str | None = "anime") -> dict[str, Any]:
+    selected = (preset_id or "anime").strip()
+    for preset in hybrid_presets():
+        if preset["id"] == selected:
+            return preset
+    raise ValueError(f"综合模式未配置该模型档位：{selected}")
 
 
 def turbo_preset_ids(mode: str) -> list[str]:
@@ -898,7 +958,7 @@ def turbo_preset_ids(mode: str) -> list[str]:
     if mode == "reference_to_video":
         return ["turbo-0.5-4", "turbo-0.5-6", "turbo-0.5-8"]
     if mode == "hybrid_to_video":
-        return list(HYBRID_TURBO_PRESETS)
+        return list(_hybrid_turbo_presets())
     return ["turbo-0.5-6", "turbo-0.5-8", "turbo-1.0-4"]
 
 
@@ -909,7 +969,7 @@ def resolve_turbo_preset(preset: str | None, mode: str) -> dict[str, Any] | None
     if mode == "reference_to_video":
         return TURBO_REF2V_PRESETS.get(preset)
     if mode == "hybrid_to_video":
-        return HYBRID_TURBO_PRESETS.get(preset)
+        return _hybrid_turbo_presets().get(preset)
     return TURBO_FL2V_PRESETS.get(preset)
 
 
@@ -1002,22 +1062,29 @@ def _workflow(
     mode: str, prompt: str, width: int, height: int, duration: float, seed: int,
     nsfw: bool = False, turbo: dict[str, Any] | None = None,
     nsfw_preset: dict[str, Any] | None = None,
+    hybrid_preset: str = "anime",
 ) -> dict:
     # NSFW 档位 = 一组按序叠加的 LoRA，仅普通工作流生效；与 turbo 蒸馏 LoRA 互斥
     # （两者叠加会互相破坏采样轨迹）。接口层已拒绝该组合，这里再兜底一次，
     # 以防历史任务记录被手工改成两者同时开启。
-    loras: list[dict[str, Any]] = list((nsfw_preset or {}).get("loras") or []) if nsfw else []
+    loras: list[dict[str, Any]] = (
+        list((nsfw_preset or {}).get("loras") or [])
+        if nsfw and mode != "hybrid_to_video" else []
+    )
     if turbo and loras:
         raise ValueError("NSFW LoRA 与 turbo 加速不能同时使用")
     if mode == "hybrid_to_video":
-        # 混合生成模式（Dasiwa Hybrid 基模）：一个模型同时覆盖 fl2v（文本/首尾帧）与
-        # ref2v（多模态参考）能力。普通档（Non-Distilled，固定 25 步）串联 Spectrum 加速
-        # 节点跳步；turbo 加速（可选开关）换蒸馏基模固定 8 步、不挂 Spectrum。
+        # Both checkpoints support keyframes and multimodal references. Eros has
+        # Turbo baked in; never swap it for the legacy Dasiwa Turbo model.
+        preset = resolve_hybrid_preset(hybrid_preset)
+        if preset["distilled"] and turbo:
+            raise ValueError("Eros Max beta5 已内置 Turbo，请取消额外 Turbo 档位")
+        sampling = turbo or preset
         # conditioning 节点在运行时二选一：有参考素材 → 136（ReferenceToVideo），
         # 否则 → 104（ImageToVideo，含首尾帧）；模板同时定义两者，_run_generation 裁剪。
-        name = "hybrid_video_turbo_api.json" if turbo else "hybrid_video_api.json"
+        name = "hybrid_video_turbo_api.json" if turbo or preset["distilled"] else "hybrid_video_api.json"
         workflow = json.loads((Path(VIDEO_WORKFLOW_FOLDER) / name).read_text(encoding="utf-8"))
-        workflow["6"]["inputs"]["unet_name"] = turbo["diffusion"] if turbo else COMFYUI_HYBRID_MODEL
+        workflow["6"]["inputs"]["unet_name"] = turbo["diffusion"] if turbo else preset["model"]
         workflow["11"]["inputs"]["vae_name"] = COMFYUI_VIDEO_VAE
         workflow["24"]["inputs"]["vae_name"] = COMFYUI_AUDIO_VAE
         workflow["13"]["inputs"]["clip_name"] = COMFYUI_TEXT_ENCODER
@@ -1032,20 +1099,13 @@ def _workflow(
         workflow["92"]["inputs"]["filename_prefix"] = f"{prefix}_{uuid.uuid4().hex}"
         for node_id in ("3", "4"):
             workflow[node_id]["inputs"].update(width=width, height=height)
-        if turbo:
-            workflow["123"]["inputs"].update(
-                {"shift_video": turbo["shift_video"], "shift_audio": turbo["shift_audio"]}
-            )
-            workflow["9"]["inputs"].update(steps=turbo["steps"], scheduler=turbo["scheduler"])
-            workflow["17"]["inputs"]["sampler_name"] = turbo["sampler"]
-        else:
-            workflow["123"]["inputs"].update(
-                {"shift_video": HYBRID_SHIFT_VIDEO, "shift_audio": HYBRID_SHIFT_AUDIO}
-            )
-            workflow["9"]["inputs"].update(steps=HYBRID_STEPS, scheduler=HYBRID_SCHEDULER)
-            workflow["17"]["inputs"]["sampler_name"] = HYBRID_SAMPLER
-            # 普通档（25 步）：UNET(6) → SigmaShift(123) → Spectrum(150) → 调度器/引导器。
-            _apply_spectrum(workflow, "123", ["9", "16"], COMFYUI_SPECTRUM_ENABLED)
+        workflow["123"]["inputs"].update(
+            shift_video=sampling["shift_video"], shift_audio=sampling["shift_audio"]
+        )
+        workflow["9"]["inputs"].update(steps=sampling["steps"], scheduler=sampling["scheduler"])
+        workflow["17"]["inputs"]["sampler_name"] = sampling["sampler"]
+        # Preserve reference fidelity: these presets do not reuse cached steps.
+        _apply_spectrum(workflow, "123", ["9", "16"], False)
         return workflow
     if mode == "reference_to_video":
         # ref2v turbo：三个档位（0.5 的 4/6/8 step）共用同一个 4step 蒸馏 lora；
@@ -1109,6 +1169,29 @@ def _workflow(
         workflow.pop("4")
         workflow["104"]["inputs"].pop("last_frame")
     return workflow
+
+
+def _crop_workflow_output(workflow: dict, sampling_width: int, sampling_height: int,
+                          output_width: int, output_height: int) -> None:
+    """Remove grid padding in pixel space before the only video encoding pass."""
+    if (output_width, output_height) == (sampling_width, sampling_height):
+        return
+    if not (0 < output_width <= sampling_width and 0 < output_height <= sampling_height):
+        raise ValueError("成品尺寸必须位于模型采样画布内")
+    if output_width % 2 or output_height % 2:
+        raise ValueError("视频成品尺寸必须为偶数像素")
+    for key, node in list(workflow.items()):
+        if node["class_type"] != "CreateVideo":
+            continue
+        crop_id = f"studio_output_crop_{key}"
+        if crop_id in workflow:
+            raise ValueError("成品裁边节点冲突")
+        workflow[crop_id] = {"class_type": "ImageCrop", "inputs": {
+            "image": node["inputs"]["images"], "width": output_width, "height": output_height,
+            "x": (sampling_width - output_width) // 2,
+            "y": (sampling_height - output_height) // 2,
+        }}
+        node["inputs"]["images"] = [crop_id, 0]
 
 
 def _frame_length(duration: float) -> int:
@@ -1312,14 +1395,20 @@ async def _run_generation(task_id: str) -> None:
     client = ComfyClient()
     try:
         data = load_metadata(task_id)
+        sampling_width = data.get("sampling_width", data["width"])
+        sampling_height = data.get("sampling_height", data["height"])
         workflow = _workflow(
-            data["mode"], data["prompt"], data["width"], data["height"], data["duration"], data["seed"],
+            data["mode"], data["prompt"], sampling_width, sampling_height, data["duration"], data["seed"],
             nsfw=task_nsfw_enabled(data),
             nsfw_preset=resolve_nsfw_preset(
                 data.get("nsfw_preset"), data["mode"], task_nsfw_enabled(data)
             ),
             turbo=resolve_turbo_preset(data.get("resolution_preset"), data["mode"]),
+            hybrid_preset=data.get("hybrid_preset") or "anime",
         )
+        _crop_workflow_output(workflow, sampling_width, sampling_height,
+                              data.get("output_width", data["width"]),
+                              data.get("output_height", data["height"]))
         if data["mode"] == "reference_to_video" or (
             data["mode"] == "hybrid_to_video" and data.get("_reference_assets")
         ):
@@ -1368,7 +1457,7 @@ async def _run_generation(task_id: str) -> None:
                     # 仍保持视频格式；压缩失败时回退为上传原视频。
                     target_fps = _frame_length(data["duration"]) / data["duration"]
                     compressed = _resize_reference_video(
-                        source, data["width"], data["height"], target_fps
+                        source, sampling_width, sampling_height, target_fps
                     )
                     if compressed:
                         upload_source = compressed
@@ -1615,6 +1704,20 @@ def video_output_filename(task_id: str, data: dict[str, Any], suffix: str = ".mp
     return f"AI_Video_{mode_label}_{date_label}_{task_id[:8]}{safe_suffix}"
 
 
+def _verify_output_dimensions(path: Path, data: dict) -> None:
+    if "output_width" not in data or "output_height" not in data:
+        return  # Historic tasks retain their original, explicitly recorded canvas.
+    import av
+    with av.open(str(path)) as media:
+        if not media.streams.video:
+            raise ValueError("工作流结果没有视频画面")
+        stream = media.streams.video[0]
+        actual = (stream.width, stream.height)
+        expected = (data["output_width"], data["output_height"])
+        if actual != expected or stream.sample_aspect_ratio not in (None, 1):
+            raise ValueError(f"工作流成品尺寸或像素比例异常：实际{actual}，要求{expected}方形像素")
+
+
 async def _complete_from_history(task_id: str, history_item: dict, client: ComfyClient) -> None:
     status = history_item.get("status", {})
     if status.get("status_str") == "error" or status.get("completed") is False:
@@ -1626,6 +1729,7 @@ async def _complete_from_history(task_id: str, history_item: dict, client: Comfy
     task_data = load_metadata(task_id)
     destination = task_dir(task_id) / "outputs" / video_output_filename(task_id, task_data, suffix)
     await asyncio.to_thread(client.download, descriptor, destination)
+    await asyncio.to_thread(_verify_output_dimensions, destination, task_data)
     data = load_metadata(task_id)
     data["_assets"]["video"] = str(destination.resolve())
     data.update(
@@ -1637,6 +1741,9 @@ async def _complete_from_history(task_id: str, history_item: dict, client: Comfy
         error=None,
     )
     _save_metadata(data)
+    # H3 is already durably completed. Finishing failures must not turn it failed.
+    from services.auto_postprocess import ensure_auto_postprocess
+    await ensure_auto_postprocess(task_id)
 
 
 async def resume_incomplete_tasks() -> None:

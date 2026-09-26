@@ -19,6 +19,16 @@ class VideoTaskSummary(BaseModel):
     duration: float
     width: int
     height: int
+    sampling_width: int | None = None
+    sampling_height: int | None = None
+    output_width: int | None = None
+    output_height: int | None = None
+    aspect_ratio_fraction: str | None = None
+    target_resolution: Literal["720p", "1080p", "1440p"] = "1080p"
+    source_resolution_profile: str = ""
+    auto_postprocess: bool = False
+    auto_postprocess_task_id: str | None = None
+    auto_postprocess_error: str | None = None
     resolution_megapixels: float = 0.4
     resolution_preset: str | None = Field(
         default=None, description="turbo 分辨率档位 id（如 turbo-0.5-6）；普通档位为空"
@@ -26,6 +36,7 @@ class VideoTaskSummary(BaseModel):
     turbo_steps: int | None = Field(default=None, description="turbo 蒸馏采样步数（4/6/8）")
     aspect_ratio: str = "16:9"
     seed: int
+    seed_text: str | None = None
     progress: float = Field(ge=0, le=100)
     queue_position: int | None = None
     current_stage: str | None = None
@@ -44,6 +55,9 @@ class VideoTaskSummary(BaseModel):
     nsfw_preset: str | None = Field(
         default=None, description="NSFW 档位 id（如 aio / aio-vagina）；未开启为空"
     )
+    hybrid_preset: Literal["anime", "nsfw"] | None = None
+    hybrid_model: str | None = None
+    sampling_steps: int | None = None
     # 历史字段：NSFW 曾用强度/原生开关，现统一为 nsfw 布尔（读取时历史值回落为 true）。
     nsfw_strength: float | None = None
     nsfw_native: bool | None = None
@@ -67,3 +81,4 @@ class PromptPolishResponse(BaseModel):
     prompt: str
     model: str
     mode: VideoMode
+    hybrid_preset: Literal["anime", "nsfw"] | None = None

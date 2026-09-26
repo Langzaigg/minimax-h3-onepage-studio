@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <title>兔酱拍片工作室</title>
+  <rect width="64" height="64" rx="14" fill="#A93429"/>
+  <path d="m22 34-5-18c-1-5 1-8 4-9 4-1 7 2 8 7l3 17m2 0 4-17c1-5 5-7 8-5 4 2 4 5 2 10l-7 16" fill="#FFF9F4"/>
+  <ellipse cx="32" cy="41" rx="18" ry="16" fill="#FFF9F4"/>
+  <path d="M28 33.5a1 1 0 0 1 1.5-.86l11 6.5a1 1 0 0 1 0 1.72l-11 6.5a1 1 0 0 1-1.5-.86z" fill="#A93429"/>
+</svg>

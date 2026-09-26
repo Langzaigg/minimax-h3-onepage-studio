@@ -18,6 +18,7 @@ from config import (
     LLM_CONTEXT_MARGIN_TOKENS,
     LLM_CONTEXT_WINDOW,
     LLM_MIN_COMPLETION_TOKENS,
+    LLM_MAX_OUTPUT_TOKENS,
     LLM_REASONING_EFFORT,
     LLM_TIMEOUT,
     VIDEO_MODEL,
@@ -63,11 +64,12 @@ class LLMClient:
         payload = {
             "model": options.model,
             "messages": messages,
+            "max_tokens": min(available, LLM_MAX_OUTPUT_TOKENS),
         }
         if LLM_REASONING_EFFORT in {"low", "medium", "high"}:
             # OpenAI 兼容思考模型（如 kimi-k2.7-code）：用 reasoning_effort 控制思考力度。
             payload["reasoning_effort"] = LLM_REASONING_EFFORT
-        else:
+        elif self.base_url.startswith(("http://127.0.0.1", "http://localhost")):
             # 本地 vLLM 风格部署：显式关闭思考输出。
             payload["chat_template_kwargs"] = {"enable_thinking": False}
         headers = {"Content-Type": "application/json"}
@@ -105,7 +107,13 @@ class LLMClient:
                     )
                     raise RuntimeError("LLM 响应不是合法 JSON") from error
                 try:
-                    return str(body["choices"][0]["message"].get("content") or "").strip()
+                    content = body["choices"][0]["message"].get("content")
+                    if isinstance(content, list):
+                        content = "\n".join(str(part.get("text", "")) for part in content if isinstance(part, dict))
+                    result = str(content or "").strip()
+                    if not result:
+                        raise RuntimeError("提示词模型未返回正文，请重试或直接使用原提示词")
+                    return result
                 except (KeyError, IndexError, TypeError) as error:
                     logger.error("LLM 响应缺少 choices[0].message.content：%s", str(body)[:500])
                     raise RuntimeError("LLM 响应中缺少 choices[0].message.content") from error

@@ -12,6 +12,7 @@ from config import (
     COMFYUI_BASE_URL,
     COMFYUI_FL2VA_MODEL,
     COMFYUI_HYBRID_MODEL,
+    COMFYUI_HYBRID_NSFW_MODEL,
     COMFYUI_HYBRID_TURBO_MODEL,
     COMFYUI_REF2VA_MODEL,
     COMFYUI_SPECTRUM_ENABLED,
@@ -75,11 +76,11 @@ REQUIRED_MODELS["loras"] = set(TURBO_LORAS) | NSFW_LORAS
 # 与常规模型同在 diffusion_models；配置了哪个就校验哪个。
 if COMFYUI_HYBRID_MODEL:
     REQUIRED_MODELS["diffusion_models"].add(COMFYUI_HYBRID_MODEL)
+if COMFYUI_HYBRID_NSFW_MODEL:
+    REQUIRED_MODELS["diffusion_models"].add(COMFYUI_HYBRID_NSFW_MODEL)
 if COMFYUI_HYBRID_TURBO_MODEL:
     REQUIRED_MODELS["diffusion_models"].add(COMFYUI_HYBRID_TURBO_MODEL)
-# 混合模式普通档（25 步）工作流串联 Spectrum 加速节点（与 fl2v 普通工作流一致）。
-if COMFYUI_HYBRID_MODEL and COMFYUI_SPECTRUM_ENABLED:
-    REQUIRED_NODES.add("SpectrumApplyMiniMaxH3")
+# 综合模式的 Dasiwa V2 / Eros 不挂 Spectrum。
 # 混合模式 turbo 工作流需要 SigmaShift 节点（蒸馏档位重建 sigma 网格）。
 if COMFYUI_HYBRID_TURBO_MODEL:
     REQUIRED_NODES.add("MiniMaxH3SigmaShift")
@@ -103,6 +104,17 @@ def main() -> int:
         available = set(get_json(session, f"/models/{folder}"))
         missing.extend(f"模型：models/{folder}/{name}" for name in sorted(expected - available))
     queue = get_json(session, "/queue")
+    # Use the same readiness checks as the page, including local runtime files.
+    # This inspects dependencies only; it does not submit any GPU task.
+    from routers.studio import _capabilities
+    capabilities = _capabilities()
+    if not capabilities["image"]["enabled"]:
+        missing.append(capabilities["image"]["description"])
+    for preset in capabilities["postprocess"]["presets"]:
+        if preset.get("archived"):
+            continue
+        if not preset["available"]:
+            missing.append(f"{preset['label']}：{preset.get('reason', '环境未就绪')}")
     print(f"ComfyUI: {COMFYUI_BASE_URL}")
     print(
         f"队列：运行 {len(queue.get('queue_running', []))}，"
@@ -112,7 +124,7 @@ def main() -> int:
         print("缺少以下依赖：")
         print("\n".join(f"- {item}" for item in missing))
         return 1
-    print("节点、模型和队列接口检查通过。")
+    print("H3、Qwen、LTX 二采、DLSS 滤镜依赖与队列接口检查通过（未执行推理）。")
     return 0
 
 

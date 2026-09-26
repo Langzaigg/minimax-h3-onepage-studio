@@ -5,6 +5,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from config import (
     ACCESS_MODE,
@@ -24,7 +25,8 @@ from config import (
     WEEKLY_CLEANUP_WEEKDAY,
     ensure_directories,
 )
-from routers import access, admin, video
+from routers import access, admin, video, studio, workspaces
+from services import studio_tasks
 from services import access_control
 from services.storage_maintenance import cleanup_expired_history, emergency_cleanup_if_needed
 from services.video_generation import resume_incomplete_tasks, shutdown_background_tasks
@@ -71,6 +73,9 @@ async def daily_storage_check() -> None:
 async def lifespan(_: FastAPI):
     ensure_directories()
     await resume_incomplete_tasks()
+    await studio_tasks.resume()
+    from services.auto_postprocess import resume_completed_tasks
+    await resume_completed_tasks()
     jobs = [asyncio.create_task(weekly_history_cleanup()), asyncio.create_task(daily_storage_check())]
     try:
         yield
@@ -79,12 +84,13 @@ async def lifespan(_: FastAPI):
             job.cancel()
         await asyncio.gather(*jobs, return_exceptions=True)
         await shutdown_background_tasks()
+        await studio_tasks.shutdown()
 
 
 app = FastAPI(
-    title="MiniMax H3 一页式创作台",
-    description="带访问控制、提示词润色、异步历史和资源代理的独立视频生成 API",
-    version="1.0.0",
+    title="兔酱拍片工作室",
+    description="Qwen 参考图、MiniMax H3 视频、LTX 2× 二采与 DLSS 5 滤镜，支持素材工作区和任务复用",
+    version="2.0.0",
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
@@ -96,10 +102,11 @@ app = FastAPI(
         {"name": "访问验证", "description": "管理员密钥或 API Key 验证。"},
         {"name": "系统运维", "description": "API Key、统计及更新重启。"},
         {"name": "系统", "description": "健康检查和非敏感前端配置。"},
+        {"name": "创作流程", "description": "参考图、视频后处理、跨步骤素材及可恢复任务。"},
     ],
 )
 
-BUSINESS_API_TAGS = {video.TAG_WORKFLOWS, video.TAG_POLISH, video.TAG_TASKS}
+BUSINESS_API_TAGS = {video.TAG_WORKFLOWS, video.TAG_POLISH, video.TAG_TASKS, "创作流程"}
 
 
 @app.middleware("http")
@@ -121,6 +128,9 @@ async def record_business_api_usage(request, call_next):
 app.include_router(admin.router)
 app.include_router(access.router)
 app.include_router(video.router)
+app.include_router(studio.router)
+app.include_router(workspaces.router)
+app.mount("/static", StaticFiles(directory=PROJECT_ROOT / "static", check_dir=False), name="static")
 
 
 def read_html_template(filename: str) -> str:
@@ -171,6 +181,7 @@ async def frontend_config():
         },
         # 混合生成模式（Dasiwa Hybrid）能力开关：基模配置存在即可用。
         "hybrid_enabled": bool(video_service.COMFYUI_HYBRID_MODEL),
+        "hybrid_presets": video_service.hybrid_presets(),
         "hybrid_turbo_enabled": bool(video_service.COMFYUI_HYBRID_TURBO_MODEL),
         "hybrid_steps": video_service.HYBRID_STEPS,
         "hybrid_sampler": video_service.HYBRID_SAMPLER,

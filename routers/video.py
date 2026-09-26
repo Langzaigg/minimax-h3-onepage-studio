@@ -3,8 +3,9 @@ import tempfile
 import math
 import logging
 from io import BytesIO
+from fractions import Fraction
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile
 from fastapi.concurrency import run_in_threadpool
@@ -22,6 +23,7 @@ from config import (
 from models.video import PromptPolishResponse, VideoQueueStatus, VideoTaskList, VideoTaskSummary
 from routers.access import require_video_access
 from services import video_generation as video_service
+from services.delivery_profiles import fit_even_aspect, parse_aspect, ratio_text, source_profile, target_size
 
 
 logger = logging.getLogger(__name__)
@@ -43,24 +45,16 @@ def derive_mode(has_first: bool, has_last: bool) -> str:
     return "text_to_video"
 
 
-ASPECT_RATIOS = {
-    "16:9": 16 / 9,
-    "9:16": 9 / 16,
-    "1:1": 1,
-    "4:3": 4 / 3,
-    "3:4": 3 / 4,
-    "3:2": 3 / 2,
-    "2:3": 2 / 3,
-    "21:9": 21 / 9,
-}
+ASPECT_RATIOS = {name: parse_aspect(name) for name in
+                 ("16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3", "21:9")}
 REFERENCE_MAX_BYTES = {"image": 25 * 1024 * 1024, "video": 200 * 1024 * 1024, "audio": 100 * 1024 * 1024}
 
 
-def image_ratio(content: bytes) -> float:
+def image_ratio(content: bytes) -> Fraction:
     try:
         with Image.open(BytesIO(content)) as image:
             image.verify()
-            return image.width / image.height
+            return Fraction(image.width, image.height)
     except Exception as error:
         raise HTTPException(status_code=400, detail=f"参考图片不是有效图片：{error}")
 
@@ -81,10 +75,10 @@ def dimensions(megapixels: float, ratio: float) -> tuple[int, int]:
 
 def resolve_aspect_ratio(
     requested: str,
-    first_ratio: float | None,
-    last_ratio: float | None,
-    reference_ratio: float | None = None,
-) -> tuple[str, float]:
+    first_ratio: Fraction | None,
+    last_ratio: Fraction | None,
+    reference_ratio: Fraction | None = None,
+) -> tuple[str, Fraction]:
     if requested == "auto":
         # Automatic selection is intentionally shared by every video mode:
         # first frame, then last frame, then the first reference image, and
@@ -95,7 +89,49 @@ def resolve_aspect_ratio(
         return "16:9", ASPECT_RATIOS["16:9"]
     if requested in ASPECT_RATIOS:
         return requested, ASPECT_RATIOS[requested]
-    raise HTTPException(status_code=400, detail="不支持的画面比例")
+    try:
+        ratio = parse_aspect(requested)
+        return ratio_text(ratio), ratio
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+def resolve_source_dimensions(megapixels, ratio, target_resolution, source_resolution_profile,
+                              *, turbo=None, mode=None):
+    """Separate the model grid from the exact-ratio source video we publish."""
+    try:
+        target_size(target_resolution)
+        profile_id = (source_resolution_profile or "").strip()
+        if profile_id:
+            profile = source_profile(profile_id)
+            if ratio != Fraction(16, 9):
+                raise ValueError("作者初采方案仅支持16:9；其他比例请使用自定义像素预算")
+            if turbo and mode != "hybrid_to_video" and float(turbo["megapixels"]) != profile["source_megapixels"]:
+                raise ValueError("Turbo固定像素预算与初采方案不一致；请取消初采方案或选择相同预算")
+            megapixels = profile["source_megapixels"]
+            sampling_width, sampling_height = profile["sampling_width"], profile["sampling_height"]
+        else:
+            sampling_width, sampling_height = dimensions(megapixels, ratio)
+        output_width, output_height = fit_even_aspect(sampling_width, sampling_height, ratio)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return megapixels, {
+        "sampling_width": sampling_width, "sampling_height": sampling_height,
+        "output_width": output_width, "output_height": output_height,
+        "aspect_ratio_fraction": ratio_text(ratio), "target_resolution": target_resolution,
+        "source_resolution_profile": profile_id,
+    }
+
+
+def _auto_source_options(enabled, duration, aspect_ratio, target_resolution):
+    """Only the explicit server-side finishing checkbox selects a source profile."""
+    if not enabled:
+        return aspect_ratio, ""
+    if duration > 16.25:
+        raise HTTPException(status_code=400, detail="自动二采目前仅支持16.25秒以内的视频")
+    if video_service._frame_length(duration) / 24 > 16.25:
+        raise HTTPException(status_code=400, detail="H3帧数网格会使实际视频超过自动二采16.25秒上限；请选择15.79秒或更短")
+    return "16:9", target_resolution
 
 
 async def temporary_upload(upload: UploadFile | None) -> Path | None:
@@ -165,6 +201,13 @@ def validate_nsfw_turbo_conflict(nsfw_preset: dict | None, turbo: dict | None) -
 def _merge_nsfw(nsfw: bool, nsfw_native: bool, nsfw_strength: float) -> bool:
     """兼容历史参数：nsfw_native=true 或 nsfw_strength>0 一律回落为 nsfw=true（开启）。"""
     return bool(nsfw or nsfw_native or float(nsfw_strength or 0) > 0)
+
+
+def resolve_hybrid(hybrid_preset: str) -> dict:
+    try:
+        return video_service.resolve_hybrid_preset(hybrid_preset)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
 
 def resolve_resolution(
@@ -309,10 +352,12 @@ async def hybrid_prompt_polish(
     reference_images: list[UploadFile] = File(default=[]),
     reference_videos: list[UploadFile] = File(default=[]),
     reference_audios: list[UploadFile] = File(default=[]),
+    hybrid_preset: Annotated[Literal["anime", "nsfw"], Form()] = "anime",
 ):
     """混合模式（Dasiwa Hybrid）润色：上传参考素材时走六段式全参考润色
     （首尾帧不参与分析，作为生成时的关键帧锚定），否则走文本/首尾帧润色；
     无论 nsfw 是否开启，破甲（NSFW 增强）始终自动打开。"""
+    resolve_hybrid(hybrid_preset)
     nsfw = _merge_nsfw(nsfw, nsfw_native, nsfw_strength)
     has_reference = bool(reference_images or reference_videos or reference_audios)
     if has_reference:
@@ -334,7 +379,7 @@ async def hybrid_prompt_polish(
                 True,  # force_armor（仅非混合路径使用）
                 True,  # hybrid：混合模式专属提示词；破甲由全局 llm.nsfw_armor 开关拼接控制
             )
-            return {"prompt": result, "model": video_service.VIDEO_MODEL, "mode": "hybrid_to_video"}
+            return {"prompt": result, "model": video_service.VIDEO_MODEL, "mode": "hybrid_to_video", "hybrid_preset": hybrid_preset}
         except HTTPException:
             raise
         except Exception as error:
@@ -353,7 +398,7 @@ async def hybrid_prompt_polish(
         result = await run_in_threadpool(
             video_service.polish_prompt, prompt, "hybrid_to_video", duration, paths, nsfw
         )
-        return {"prompt": result, "model": video_service.VIDEO_MODEL, "mode": "hybrid_to_video"}
+        return {"prompt": result, "model": video_service.VIDEO_MODEL, "mode": "hybrid_to_video", "hybrid_preset": hybrid_preset}
     except HTTPException:
         raise
     except Exception as error:
@@ -383,7 +428,12 @@ async def _create_video_task_impl(
     owner: str = "admin",
     nsfw: bool = False,
     nsfw_preset: str = "",
+    target_resolution: str = "1080p",
+    source_resolution_profile: str = "",
+    auto_postprocess: bool = False,
 ):
+    aspect_ratio, source_resolution_profile = _auto_source_options(
+        auto_postprocess, duration, aspect_ratio, target_resolution)
     first_content = await first_frame.read() if first_frame else None
     last_content = await last_frame.read() if last_frame else None
     mode = derive_mode(bool(first_content), bool(last_content))
@@ -397,13 +447,17 @@ async def _create_video_task_impl(
     warnings = []
     if duration >= 8:
         warnings.append("时长达到 8 秒或以上，生成时间会很长。")
-    if effective_megapixels > 0.5:
-        warnings.append("分辨率高于 0.5 MP，生成时间会很长。")
     if first_ratio and last_ratio and abs(first_ratio - last_ratio) / max(first_ratio, last_ratio) > 0.03:
         warnings.append("首帧与末帧画面比例不一致，生成时会按所选比例居中裁剪。")
     effective_aspect_ratio, ratio = resolve_aspect_ratio(aspect_ratio, first_ratio, last_ratio)
-    width, height = dimensions(effective_megapixels, ratio)
+    effective_megapixels, source_dimensions = resolve_source_dimensions(
+        effective_megapixels, ratio, target_resolution, source_resolution_profile, turbo=turbo, mode=mode)
+    width, height = source_dimensions["output_width"], source_dimensions["output_height"]
+    if effective_megapixels > 0.5:
+        warnings.append("分辨率高于 0.5 MP，生成时间会很长。")
     extras = {
+        **source_dimensions,
+        "auto_postprocess": bool(auto_postprocess),
         "nsfw": bool(nsfw_preset_id),
         "nsfw_preset": nsfw_preset_id["id"] if nsfw_preset_id else None,
         "resolution_preset": preset_id,
@@ -466,14 +520,19 @@ async def _create_reference_video_task_impl(
     owner: str = "admin",
     nsfw: bool = False,
     nsfw_preset: str = "",
+    target_resolution: str = "1080p",
+    source_resolution_profile: str = "",
+    auto_postprocess: bool = False,
 ):
+    aspect_ratio, source_resolution_profile = _auto_source_options(
+        auto_postprocess, duration, aspect_ratio, target_resolution)
     # 参考生成接口的 NSFW 由 ref2v 专属 LoRA 档位提供（不替换 Ref2VA 基模），
     # 仅普通工作流可用，与 turbo 加速互斥；未配置档位时拒绝开启。
     nsfw_preset_id = resolve_nsfw(nsfw, nsfw_preset, "reference_to_video")
     validate_reference_counts(len(reference_images), len(reference_videos), len(reference_audios))
     validate_reference_uploads(reference_images, reference_videos, reference_audios)
-    if aspect_ratio != "auto" and aspect_ratio not in ASPECT_RATIOS:
-        raise HTTPException(status_code=400, detail="不支持的画面比例")
+    if aspect_ratio != "auto":
+        resolve_aspect_ratio(aspect_ratio, None, None)
     if ref_image_size not in {"match", "max"}:
         raise HTTPException(status_code=400, detail="ref_image_size 仅支持 match 或 max")
     effective_megapixels, preset_id, turbo = resolve_resolution(
@@ -495,16 +554,21 @@ async def _create_reference_video_task_impl(
     warnings = []
     if duration >= 8:
         warnings.append("时长达到 8 秒或以上，生成时间会很长。")
-    if effective_megapixels > 0.5:
-        warnings.append("分辨率高于 0.5 MP，生成时间会很长。")
     if ref_image_size == "max":
         warnings.append("参考图保真度选择 max，参考 token 会参与每一步采样，生成时间会显著增加。")
     effective_aspect_ratio, ratio = resolve_aspect_ratio(
         aspect_ratio, None, None, first_reference_ratio
     )
-    width, height = dimensions(effective_megapixels, ratio)
+    effective_megapixels, source_dimensions = resolve_source_dimensions(
+        effective_megapixels, ratio, target_resolution, source_resolution_profile,
+        turbo=turbo, mode="reference_to_video")
+    width, height = source_dimensions["output_width"], source_dimensions["output_height"]
+    if effective_megapixels > 0.5:
+        warnings.append("分辨率高于 0.5 MP，生成时间会很长。")
     counts = {"images": len(groups[0]), "videos": len(groups[1]), "audios": len(groups[2])}
     extras = {
+        **source_dimensions,
+        "auto_postprocess": bool(auto_postprocess),
         "reference_counts": counts,
         "ref_image_size": ref_image_size,
         "use_video_audio": use_video_audio,
@@ -570,13 +634,22 @@ async def _create_hybrid_video_task_impl(
     auto_polish: bool = False,
     owner: str = "admin",
     nsfw: bool = False,
+    hybrid_preset: str = "anime",
+    target_resolution: str = "1080p",
+    source_resolution_profile: str = "",
+    auto_postprocess: bool = False,
 ):
+    aspect_ratio, source_resolution_profile = _auto_source_options(
+        auto_postprocess, duration, aspect_ratio, target_resolution)
     # 混合模式（Dasiwa Hybrid）一个基模同时覆盖 fl2v 与 ref2v 能力：
     # 有参考素材 → 参考通道（136）；此时首尾帧不再忽略，而是作为关键帧锚定，
     # 与参考媒体一起构成纯官方节点的“混合参考”（136 + MiniMaxH3AddGuide）。
     # 无参考素材 → 文本/首尾帧通道（104）。
     # NSFW 不叠加 LoRA（基模自带能力），nsfw 布尔仅影响润色时是否额外注入风格指南，
     # 破甲（NSFW 增强）在润色时始终自动打开。
+    selected_hybrid = resolve_hybrid(hybrid_preset)
+    if selected_hybrid["distilled"] and resolution_preset:
+        raise HTTPException(status_code=400, detail="Eros Max beta5 已内置 Turbo，请取消额外 Turbo 档位")
     first_content = await first_frame.read() if first_frame else None
     last_content = await last_frame.read() if last_frame else None
     groups: list[list[tuple[UploadFile, bytes]]] = []
@@ -605,8 +678,6 @@ async def _create_hybrid_video_task_impl(
     warnings = []
     if duration >= 8:
         warnings.append("时长达到 8 秒或以上，生成时间会很长。")
-    if effective_megapixels > 0.5:
-        warnings.append("分辨率高于 0.5 MP，生成时间会很长。")
     if has_reference:
         if first_content or last_content:
             warnings.append(
@@ -619,9 +690,19 @@ async def _create_hybrid_video_task_impl(
     effective_aspect_ratio, ratio = resolve_aspect_ratio(
         aspect_ratio, first_ratio, last_ratio, first_reference_ratio
     )
-    width, height = dimensions(effective_megapixels, ratio)
+    effective_megapixels, source_dimensions = resolve_source_dimensions(
+        effective_megapixels, ratio, target_resolution, source_resolution_profile,
+        turbo=turbo, mode="hybrid_to_video")
+    width, height = source_dimensions["output_width"], source_dimensions["output_height"]
+    if effective_megapixels > 0.5:
+        warnings.append("分辨率高于 0.5 MP，生成时间会很长。")
     extras = {
+        **source_dimensions,
+        "auto_postprocess": bool(auto_postprocess),
         "nsfw": bool(nsfw),
+        "hybrid_preset": selected_hybrid["id"],
+        "hybrid_model": turbo["diffusion"] if turbo else selected_hybrid["model"],
+        "sampling_steps": int(turbo["steps"] if turbo else selected_hybrid["steps"]),
         "resolution_preset": preset_id,
         "_reference_assets": [],
         **({"original_prompt": prompt.strip()} if auto_polish else {}),
@@ -687,7 +768,7 @@ async def _create_hybrid_video_task_impl(
     response_model=VideoTaskSummary,
     status_code=202,
     tags=[TAG_WORKFLOWS],
-    summary="创建混合生成视频任务（Dasiwa Hybrid）",
+    summary="创建综合视频任务（动画特调 / NSFW 特调）",
 )
 async def create_hybrid_video_task(
     prompt: Annotated[str, Form(min_length=1)],
@@ -718,16 +799,22 @@ async def create_hybrid_video_task(
     reference_videos: list[UploadFile] = File(default=[]),
     reference_audios: list[UploadFile] = File(default=[]),
     access: dict = Depends(require_video_access),
+    hybrid_preset: Annotated[Literal["anime", "nsfw"], Form()] = "anime",
+    target_resolution: Annotated[str, Form()] = "1080p",
+    source_resolution_profile: Annotated[str, Form()] = "",
+    auto_postprocess: Annotated[bool, Form()] = False,
 ):
-    """Dasiwa Hybrid 基模生成：上传参考素材时走多模态参考通道（首/末帧经官方
+    """选择 Dasiwa Hybrid v2 或 Eros Max beta5：参考素材走多模态参考通道（首/末帧经官方
     MiniMaxH3AddGuide 锚定为关键帧，与参考媒体共存），否则走文本/首尾帧通道；
-    25 步普通工作流（Spectrum 跳步加速）或 turbo 蒸馏档位（固定 8 步）二选一。"""
+    Dasiwa 默认 25 步，Eros 内置 Turbo 默认 8 步，两者均保持完整采样。"""
     return await _create_hybrid_video_task_impl(
         prompt, duration, resolution_megapixels, resolution_preset, aspect_ratio, seed,
         first_frame, last_frame, ref_image_size, use_video_audio,
         reference_images, reference_videos, reference_audios,
         polish_prompt_first, access["key_id"],
         _merge_nsfw(nsfw, nsfw_native, nsfw_strength),
+        hybrid_preset,
+        target_resolution, source_resolution_profile, auto_postprocess,
     )
 
 
@@ -765,6 +852,9 @@ async def create_video_task(
     first_frame: UploadFile | None = File(None),
     last_frame: UploadFile | None = File(None),
     access: dict = Depends(require_video_access),
+    target_resolution: Annotated[str, Form()] = "1080p",
+    source_resolution_profile: Annotated[str, Form()] = "",
+    auto_postprocess: Annotated[bool, Form()] = False,
 ):
     """直接使用提交的提示词生成；不含图片、仅首帧、仅尾帧、首尾帧共用同一工作流。"""
     # 历史参数 nsfw_native=true / nsfw_strength>0 仅视为 nsfw=true（回落默认 LoRA 档位）。
@@ -773,6 +863,7 @@ async def create_video_task(
         prompt, duration, resolution_megapixels, resolution_preset, aspect_ratio, seed,
         first_frame, last_frame, polish_prompt_first, access["key_id"],
         nsfw_on, nsfw_preset,
+        target_resolution, source_resolution_profile, auto_postprocess,
     )
 
 
@@ -813,6 +904,9 @@ async def create_reference_video_task(
     reference_videos: list[UploadFile] = File(default=[]),
     reference_audios: list[UploadFile] = File(default=[]),
     access: dict = Depends(require_video_access),
+    target_resolution: Annotated[str, Form()] = "1080p",
+    source_resolution_profile: Annotated[str, Form()] = "",
+    auto_postprocess: Annotated[bool, Form()] = False,
 ):
     """直接使用提交的六段式提示词，通过 R2V 工作流生成多模态参考视频。"""
     # ref2v 不支持原生基模：历史参数 nsfw_native=true 仅视为 nsfw=true（回落默认 LoRA 档位）。
@@ -821,11 +915,22 @@ async def create_reference_video_task(
         ref_image_size, use_video_audio, reference_images, reference_videos, reference_audios,
         polish_prompt_first, access["key_id"],
         _merge_nsfw(nsfw, nsfw_native, nsfw_strength), nsfw_preset,
+        target_resolution, source_resolution_profile, auto_postprocess,
     )
 
 
 def parse_task_ids(raw: str) -> list[str]:
     return list(dict.fromkeys(part.strip().lower() for part in raw.split(",") if part.strip()))[:500]
+
+
+def authorized_task(task_id: str, access: dict) -> dict:
+    try:
+        data = video_service.load_metadata(task_id)
+    except (ValueError, FileNotFoundError):
+        raise HTTPException(status_code=404, detail="视频任务不存在")
+    if access["role"] != "admin" and video_service._task_owner(data) != access["key_id"]:
+        raise HTTPException(status_code=404, detail="视频任务不存在")
+    return data
 
 
 @router.get(
@@ -858,10 +963,10 @@ async def get_video_tasks(
     tags=[TAG_TASKS],
     summary="查询异步任务进度与结果",
 )
-async def get_video_task(task_id: str):
+async def get_video_task(task_id: str, access: dict = Depends(require_video_access)):
     """返回任务当前状态；任务完成后同一响应中的 ``assets.video`` 即为结果代理地址。"""
     try:
-        return video_service.public_task(video_service.load_metadata(task_id))
+        return video_service.public_task(authorized_task(task_id, access))
     except (ValueError, FileNotFoundError):
         raise HTTPException(status_code=404, detail="视频任务不存在")
 
@@ -872,7 +977,8 @@ async def get_video_task(task_id: str):
     tags=[TAG_TASKS],
     summary="获取任务输入或输出资源",
 )
-async def get_video_asset(task_id: str, asset_name: str):
+async def get_video_asset(task_id: str, asset_name: str, access: dict = Depends(require_video_access)):
+    authorized_task(task_id, access)
     try:
         path = video_service.asset_path(task_id, asset_name)
     except (ValueError, FileNotFoundError):
@@ -892,8 +998,9 @@ async def get_video_asset(task_id: str, asset_name: str):
     tags=[TAG_TASKS],
     summary="删除本地任务记录及全部资源",
 )
-async def delete_video_task(task_id: str):
+async def delete_video_task(task_id: str, access: dict = Depends(require_video_access)):
     """仅允许删除 completed/failed 终态任务；删除后文件不可恢复。"""
+    authorized_task(task_id, access)
     try:
         await run_in_threadpool(video_service.delete_task_record, task_id)
     except RuntimeError as error:
@@ -928,7 +1035,8 @@ async def get_video_queue(
     tags=[TAG_TASKS],
     summary="将已完成视频转换为 GIF（需配置 ffmpeg）",
 )
-async def get_video_gif(task_id: str):
+async def get_video_gif(task_id: str, access: dict = Depends(require_video_access)):
+    authorized_task(task_id, access)
     try:
         path = await run_in_threadpool(video_service.ensure_video_gif, task_id)
     except (ValueError, FileNotFoundError):

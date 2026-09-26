@@ -182,7 +182,11 @@ COMFYUI_HYBRID_TURBO_MODEL = _setting(
     "COMFYUI_HYBRID_TURBO_MODEL",
     "",
 )
-HYBRID_ENABLED = bool(COMFYUI_HYBRID_MODEL)
+COMFYUI_HYBRID_NSFW_MODEL = _setting(
+    "comfyui.models.hybrid_nsfw_diffusion", "COMFYUI_HYBRID_NSFW_MODEL",
+    "ErosMax_H3_beta5_Turbo_INT8.safetensors",
+)
+HYBRID_ENABLED = bool(COMFYUI_HYBRID_MODEL or COMFYUI_HYBRID_NSFW_MODEL)
 HYBRID_TURBO_ENABLED = bool(COMFYUI_HYBRID_TURBO_MODEL)
 # 混合模式普通档（Non-Distilled）采样参数：
 # 推荐 res_multistep/simple 或 euler/simple，Shift Video 10-12，Shift Audio 3-5；
@@ -208,10 +212,29 @@ HYBRID_TURBO_SHIFT_AUDIO = _setting(
     "comfyui.hybrid.turbo_shift_audio", "COMFYUI_HYBRID_TURBO_SHIFT_AUDIO", 3.0, float
 )
 
+# Eros beta5 already contains hybrid Turbo deltas: no additional Turbo LoRA.
+# Its author recommends res_multistep/simple, 6–9 steps. Shifts below are
+# native H3 starting values, not a claimed beta5-specific recommendation.
+HYBRID_NSFW_STEPS = _setting("comfyui.hybrid.nsfw_steps", "COMFYUI_HYBRID_NSFW_STEPS", 8, int)
+HYBRID_NSFW_SAMPLER = _setting(
+    "comfyui.hybrid.nsfw_sampler", "COMFYUI_HYBRID_NSFW_SAMPLER", "res_multistep"
+)
+HYBRID_NSFW_SCHEDULER = _setting(
+    "comfyui.hybrid.nsfw_scheduler", "COMFYUI_HYBRID_NSFW_SCHEDULER", "simple"
+)
+HYBRID_NSFW_SHIFT_VIDEO = _setting(
+    "comfyui.hybrid.nsfw_shift_video", "COMFYUI_HYBRID_NSFW_SHIFT_VIDEO", 12.0, float
+)
+HYBRID_NSFW_SHIFT_AUDIO = _setting(
+    "comfyui.hybrid.nsfw_shift_audio", "COMFYUI_HYBRID_NSFW_SHIFT_AUDIO", 3.0, float
+)
+
 LLM_BASE_URL = _setting("llm.base_url", "LLM_BASE_URL", "http://127.0.0.1:8000/v1")
-LLM_API_KEY = _setting("llm.api_key", "LLM_API_KEY", "")
+LLM_API_KEYS = [str(key).strip() for key in (_nested("llm.api_keys", []) or []) if str(key).strip()]
+LLM_API_KEY = _setting("llm.api_key", "LLM_API_KEY", LLM_API_KEYS[0] if LLM_API_KEYS else "")
 VIDEO_MODEL = _setting("llm.model", "LLM_MODEL", "vision-model")
 LLM_TIMEOUT = _setting("llm.timeout_seconds", "LLM_TIMEOUT", 180, int)
+LLM_MAX_OUTPUT_TOKENS = _setting("llm.max_output_tokens", "LLM_MAX_OUTPUT_TOKENS", 4096, int)
 LLM_CONTEXT_WINDOW = _setting("llm.context_window", "LLM_CONTEXT_WINDOW", 131000, int)
 LLM_CONTEXT_MARGIN_TOKENS = _setting(
     "llm.context_margin_tokens", "LLM_CONTEXT_MARGIN_TOKENS", 512, int

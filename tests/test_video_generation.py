@@ -3,6 +3,7 @@ import asyncio
 import re
 import subprocess
 from datetime import datetime, timedelta
+from fractions import Fraction
 from pathlib import Path
 
 import main
@@ -54,7 +55,7 @@ def test_video_modes_and_resolution_presets():
     assert resolve_aspect_ratio("auto", 4 / 3, 9 / 16) == ("auto", 4 / 3)
     assert resolve_aspect_ratio("auto", None, 9 / 16) == ("auto", 9 / 16)
     assert resolve_aspect_ratio("auto", None, None, 3 / 2) == ("auto", 3 / 2)
-    assert resolve_aspect_ratio("auto", None, None) == ("16:9", 16 / 9)
+    assert resolve_aspect_ratio("auto", None, None) == ("16:9", Fraction(16, 9))
     with pytest.raises(HTTPException):
         resolve_aspect_ratio("first_frame", 4 / 3, None)
     with pytest.raises(HTTPException):
@@ -220,16 +221,16 @@ def test_resolve_nsfw_rejects_unknown_or_missing_presets(monkeypatch):
         resolve_nsfw(True, "", "reference_to_video")
 
 
-def test_hybrid_workflow_20step_with_spectrum(monkeypatch):
-    """混合模式（Dasiwa Hybrid）20 步版：UNET → SigmaShift → Spectrum → 调度器/引导器。"""
+def test_hybrid_full_workflow_preserves_complete_sampling(monkeypatch):
+    """混合模式完整采样：UNET → SigmaShift → 调度器/引导器。"""
     monkeypatch.setattr(video_generation, "COMFYUI_HYBRID_MODEL", "DasiwaMinimaxH3_dasiwaHybridV1.safetensors")
     workflow = _workflow("hybrid_to_video", "prompt", 608, 352, 5, 123)
     assert workflow["6"]["inputs"]["unet_name"] == "DasiwaMinimaxH3_dasiwaHybridV1.safetensors"
-    # 采样链：UNET(6) → SigmaShift(123) → Spectrum(150) → 调度器/引导器。
+    # Preset sampling is independent from the legacy global Spectrum switch.
     assert workflow["123"]["inputs"]["model"] == ["6", 0]
-    assert workflow["150"]["inputs"]["model"] == ["123", 0]
-    assert workflow["9"]["inputs"]["model"] == ["150", 0]
-    assert workflow["16"]["inputs"]["model"] == ["150", 0]
+    assert "150" not in workflow
+    assert workflow["9"]["inputs"]["model"] == ["123", 0]
+    assert workflow["16"]["inputs"]["model"] == ["123", 0]
     assert workflow["9"]["inputs"]["steps"] == video_generation.HYBRID_STEPS
     assert workflow["9"]["inputs"]["scheduler"] == video_generation.HYBRID_SCHEDULER
     assert workflow["17"]["inputs"]["sampler_name"] == video_generation.HYBRID_SAMPLER
@@ -276,7 +277,8 @@ def test_hybrid_nsfw_not_applied_to_workflow(monkeypatch):
     )
     assert workflow["6"]["inputs"]["unet_name"] == "hybrid.safetensors"
     assert "151" not in workflow and "152" not in workflow
-    assert workflow["150"]["inputs"]["model"] == ["123", 0]
+    assert "150" not in workflow
+    assert workflow["16"]["inputs"]["model"] == ["123", 0]
 
 
 def test_hybrid_keyframe_chain_variants():
@@ -324,9 +326,9 @@ def test_hybrid_20step_workflow_mixed_reference_with_keyframes(monkeypatch):
     assert workflow["160"]["inputs"]["positive"] == ["136", 0]
     assert workflow["161"]["inputs"]["positive"] == ["160", 0]
     assert workflow["161"]["inputs"]["frame_idx"] == _frame_length(5) - 1
-    # 采样链不受影响：UNET → SigmaShift → Spectrum → 调度器/引导器。
-    assert workflow["9"]["inputs"]["model"] == ["150", 0]
-    assert workflow["16"]["inputs"]["model"] == ["150", 0]
+    # Keyframe anchors preserve the complete sampling path.
+    assert workflow["9"]["inputs"]["model"] == ["123", 0]
+    assert workflow["16"]["inputs"]["model"] == ["123", 0]
 
 
 def test_resolve_nsfw_has_no_native_preset(monkeypatch):

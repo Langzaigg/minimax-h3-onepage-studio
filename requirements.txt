@@ -6,3 +6,5 @@ Pillow>=12.3,<13
 PyYAML>=6.0,<7
 requests>=2.33,<3
 websockets>=15,<16
+imageio-ffmpeg>=0.6,<0.7
+av>=18.1,<19
