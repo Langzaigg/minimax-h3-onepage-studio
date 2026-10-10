@@ -618,7 +618,7 @@ async def _create_hybrid_video_task_impl(
         float, Form(ge=VIDEO_MIN_MEGAPIXELS, le=VIDEO_MAX_MEGAPIXELS)
     ] = VIDEO_DEFAULT_MEGAPIXELS,
     resolution_preset: Annotated[
-        str, Form(description="分辨率档位：留空走普通工作流（固定 25 步）；hybrid-turbo-8 为 turbo 蒸馏档位（固定 8 步）")
+        str, Form(description="分辨率档位：留空即按所选模型风格直采（V4 Turbo / Eros 均内置 Turbo）；仅配置旧版 turbo 基模时才提供 hybrid-turbo-* 档位")
     ] = "",
     aspect_ratio: Annotated[
         str, Form(description="默认 auto：首帧 → 末帧 → 第一张参考图片 → 16:9")
@@ -777,7 +777,7 @@ async def create_hybrid_video_task(
         float, Form(ge=VIDEO_MIN_MEGAPIXELS, le=VIDEO_MAX_MEGAPIXELS)
     ] = VIDEO_DEFAULT_MEGAPIXELS,
     resolution_preset: Annotated[
-        str, Form(description="分辨率档位：留空走普通工作流（固定 25 步）；hybrid-turbo-8 为 turbo 蒸馏档位（固定 8 步）")
+        str, Form(description="分辨率档位：留空即按所选模型风格直采（V4 Turbo / Eros 均内置 Turbo）；仅配置旧版 turbo 基模时才提供 hybrid-turbo-* 档位")
     ] = "",
     aspect_ratio: Annotated[
         str, Form(description="默认 auto：首帧 → 末帧 → 第一张参考图片 → 16:9")
@@ -804,9 +804,9 @@ async def create_hybrid_video_task(
     source_resolution_profile: Annotated[str, Form()] = "",
     auto_postprocess: Annotated[bool, Form()] = False,
 ):
-    """选择 Dasiwa Hybrid v2 或 Eros Max beta5：参考素材走多模态参考通道（首/末帧经官方
+    """选择 Dasiwa Hybrid V4 Turbo 或 Eros Max beta5：参考素材走多模态参考通道（首/末帧经官方
     MiniMaxH3AddGuide 锚定为关键帧，与参考媒体共存），否则走文本/首尾帧通道；
-    Dasiwa 默认 25 步，Eros 内置 Turbo 默认 8 步，两者均保持完整采样。"""
+    两个基模均自带 Turbo，按各自配置的步数（默认 8 步）完整采样，不挂 Spectrum。"""
     return await _create_hybrid_video_task_impl(
         prompt, duration, resolution_megapixels, resolution_preset, aspect_ratio, seed,
         first_frame, last_frame, ref_image_size, use_video_audio,

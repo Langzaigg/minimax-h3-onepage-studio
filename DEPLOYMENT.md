@@ -86,8 +86,9 @@ storage:
 | comfyui-kjnodes | [作者仓库](https://github.com/kijai/ComfyUI-KJNodes)，提供 `ImagePadKJ` 的边缘复制补边。 |
 | ComfyUI-StudioPost | 本仓库适配源码，提供 `StudioFrameInterpolateSampled`，保留所需 RIFE 帧并减少中间张量占用。 |
 | ComfyUI-DLSS5 | [上游仓库](https://github.com/HECer/ComfyUI-DLSS5)，Windows NR 桥接与深度／运动引导；另需本仓库的 `StudioDLSS5Filter` 适配。 |
+| ComfyUI-Spectrum-MiniMax-H3 | [上游仓库](https://github.com/xmarre/ComfyUI-Spectrum-MiniMax-H3)，提供 `SpectrumApplyMiniMaxH3` 跳步加速；本机基线 `806fe49`（v0.2.29）。仅在 H3 普通基模启用加速时需要。 |
 
-H3 综合工作流使用原生节点，不要求额外安装 Dasiwa 的界面节点包。Spectrum 默认关闭；只有在配置里明确开启相应旧模式时才需要它。不要为了归档的后处理预设下载全部旧模型或安装全部实验节点。
+H3 综合工作流使用原生节点，不要求额外安装 Dasiwa 的界面节点包。**首尾帧与多模态参考的普通基模默认挂载 Spectrum 跳步加速**（需安装上表插件；关闭 `comfyui.spectrum_apply.enabled` 时工作流会移除该节点并直接回连模型加载器，此时无需安装）；综合模式的两个基模自带 Turbo，不使用该节点。不要为了归档的后处理预设下载全部旧模型或安装全部实验节点。
 
 在 ComfyUI 的 `custom_nodes` 目录安装上游包，再用 **ComfyUI 的 Python** 安装这些包各自的依赖。DLSS 上游手动克隆还需要 Git LFS；按上游说明取得实际二进制，不能把 LFS 指针文件当 DLL。DLSS 本机上游基线为 `f4f59cd1fe39e785a3b600ca20b5e09194a9e38d`。
 
@@ -110,7 +111,7 @@ H3 综合工作流使用原生节点，不要求额外安装 Dasiwa 的界面节
 | Qwen | `diffusion_models` | `qwen_image_2.1_bf16.safetensors` |
 | Qwen | `text_encoders` | `qwen3vl_8b_int8_convrot.safetensors` |
 | Qwen | `vae` | `qwen_image_2.1_vae_bf16.safetensors` |
-| H3 动画特调 | `diffusion_models` | `DasiwaMinimaxH3_dasiwaHybridV2_int8.safetensors` |
+| H3 动画特调 | `diffusion_models` | `DasiwaMinimaxH3_dasiwaHybridV4Turbo_int8.safetensors` |
 | H3 Eros 特调 | `diffusion_models` | `ErosMax_H3_beta5_Turbo_INT8.safetensors` |
 | H3 首尾帧 | `diffusion_models` | `minimax_h3_fl2va_pruned_int8_convrot.safetensors` |
 | H3 多模态参考 | `diffusion_models` | `minimax_h3_ref2va_pruned_int8_convrot.safetensors` |
@@ -123,9 +124,11 @@ H3 综合工作流使用原生节点，不要求额外安装 Dasiwa 的界面节
 | LTX latent 2× | `latent_upscale_models` | `ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors` |
 | 可选 2× 插帧所用组件 | `frame_interpolation` | `rife_v4.26.safetensors` |
 
-当前 LTX 能力检查也检查 RIFE 文件，请一并安装，即使日常使用“不插帧”。普通 FL2V／Ref2V 的 Turbo LoRA 是独立可选项，文件名留空则不启用；Dasiwa V2 默认 25 步，Eros 自带 Turbo，默认 8 步，不要再叠加一份 Turbo LoRA。
+当前 LTX 能力检查也检查 RIFE 文件，请一并安装，即使日常使用“不插帧”。普通 FL2V／Ref2V 的 Turbo LoRA 是独立可选项，文件名留空则不启用；Dasiwa V4 Turbo 与 Eros 均自带 Turbo，默认 8 步（V4 Turbo 也可改用 4 步），不要再叠加一份 Turbo LoRA。
 
-来源：[Qwen Image 2.1](https://huggingface.co/Comfy-Org/Qwen-Image-2.1)、[MiniMax H3](https://huggingface.co/Comfy-Org/MiniMax-H3)、[Dasiwa](https://civitai.com/models/2877206?modelVersionId=3314675)、[Eros](https://huggingface.co/TenStrip/10Eros-Max)、[REDGraft](https://civitai.com/models/1295569?modelVersionId=3250230)、[LTX 2.5](https://huggingface.co/Lightricks/LTX-2.5)、[MSR](https://huggingface.co/LiconStudio/LTX-2.5-Multiple-Subject-Reference)、[RIFE](https://huggingface.co/Comfy-Org/frame_interpolation)。下载镜像应核对发布者、版本及 SHA256，不能仅依据文件名相似替换。
+来源：[Qwen Image 2.1](https://huggingface.co/Comfy-Org/Qwen-Image-2.1)、[MiniMax H3](https://huggingface.co/Comfy-Org/MiniMax-H3)、[Dasiwa](https://civitai.com/models/2877206?modelVersionId=3392061)、[Eros](https://huggingface.co/TenStrip/10Eros-Max)、[REDGraft](https://civitai.com/models/1295569?modelVersionId=3250230)、[LTX 2.5](https://huggingface.co/Lightricks/LTX-2.5)、[MSR](https://huggingface.co/LiconStudio/LTX-2.5-Multiple-Subject-Reference)、[RIFE](https://huggingface.co/Comfy-Org/frame_interpolation)。下载镜像应核对发布者、版本及 SHA256，不能仅依据文件名相似替换。
+
+当前动画特调为 Dasiwa Hybrid **V4 Turbo** int8（19.53 GB），官方校验值 SHA256 `36471afb817747b711b9abad3d8e6b7c88a7c2b91b4887d040a8dcb7ee82b2d6`；作者同时提供 int4（11.68 GB）与另一 int8 量化（15.60 GB），换用其它量化时请同步更新 `hybrid_diffusion` 文件名。
 
 当前 MSR 使用 **V1 LoRA、conv VAE 和本机低噪三步配置**。不要换成 V2／AVref、非 conv VAE 或旧 19B LoRA 后仍声称使用同一流程。采样按实际源尺寸补齐 32 网格，再做 latent 2×，不会先缩至交付目标的一半；目标 720p／1080p／1440p 在去补边后处理。
 

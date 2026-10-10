@@ -182,7 +182,8 @@ async def frontend_config():
         # 混合生成模式（Dasiwa Hybrid）能力开关：基模配置存在即可用。
         "hybrid_enabled": bool(video_service.COMFYUI_HYBRID_MODEL),
         "hybrid_presets": video_service.hybrid_presets(),
-        "hybrid_turbo_enabled": bool(video_service.COMFYUI_HYBRID_TURBO_MODEL),
+        "hybrid_turbo_enabled": bool(video_service.COMFYUI_HYBRID_TURBO_MODEL)
+        and not video_service.HYBRID_DISTILLED,
         "hybrid_steps": video_service.HYBRID_STEPS,
         "hybrid_sampler": video_service.HYBRID_SAMPLER,
         "hybrid_scheduler": video_service.HYBRID_SCHEDULER,

@@ -24,7 +24,7 @@ def api(monkeypatch):
     app.dependency_overrides[routes.require_video_access] = lambda: {"key_id": "admin"}
     started = []
     monkeypatch.setattr(video, "start_generation", started.append)
-    monkeypatch.setattr(video, "COMFYUI_HYBRID_MODEL", "DasiwaMinimaxH3_dasiwaHybridV2_int8.safetensors")
+    monkeypatch.setattr(video, "COMFYUI_HYBRID_MODEL", "DasiwaMinimaxH3_dasiwaHybridV4Turbo_int8.safetensors")
     return TestClient(app), started
 
 
@@ -140,6 +140,8 @@ def test_fixed_turbo_budget_cannot_silently_change_under_a_source_profile(api, m
 
 def test_hybrid_turbo_keeps_its_profile_while_auto_chooses_source_dimensions(api, monkeypatch):
     client, _ = api
+    # 旧版 turbo 档位只与「非蒸馏」动画基模搭配（V4 Turbo 自带 Turbo，不再提供该档位）。
+    monkeypatch.setattr(video, "HYBRID_DISTILLED", False)
     monkeypatch.setattr(video, "resolve_turbo_preset", lambda *_: {"megapixels": .5, "steps": 8, "diffusion": "fixture-hybrid.safetensors"})
     response = create(client, "hybrid-tasks", resolution_preset="fixture", auto_postprocess=True, target_resolution="720p")
     assert response.status_code == 202, response.text

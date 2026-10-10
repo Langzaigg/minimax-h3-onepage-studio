@@ -27,11 +27,11 @@ comfyui:
     fl2va_diffusion: "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
     ref2va_diffusion: "minimax_h3_ref2va_pruned_int8_convrot.safetensors"
     # 综合标签页的两个独立档位，均支持首尾帧与多模态参考。
-    # anime：Dasiwa Hybrid v2 非蒸馏版，默认完整 25 步。
+    # anime：Dasiwa Hybrid V4 Turbo（蒸馏版，作者推荐 euler/simple、4 或 8 步）。
     # nsfw：Eros beta5 已内置 Turbo，默认 8 步，不再叠加 Turbo LoRA。
-    hybrid_diffusion: "DasiwaMinimaxH3_dasiwaHybridV2_int8.safetensors"
+    hybrid_diffusion: "DasiwaMinimaxH3_dasiwaHybridV4Turbo_int8.safetensors"
     hybrid_nsfw_diffusion: "ErosMax_H3_beta5_Turbo_INT8.safetensors"
-    # 可选旧版动漫 Turbo 档；文件名留空即隐藏，仅 anime 可选。
+    # 旧版动漫 Turbo 档（已被 V4 Turbo 取代）：文件名留空即隐藏，仅 anime 可选。
     hybrid_turbo_diffusion: ""
     text_encoder: "qwen3vl_32b_minimax_h3_int8_convrot.safetensors"
     video_vae: "minimax_h3_video_vae_fp16.safetensors"
@@ -42,10 +42,12 @@ comfyui:
   nsfw:
     fl2v_presets: []
     ref2v_presets: []
-  # 采样加速（Spectrum Apply MiniMax H3），默认不启用；启用需在 ComfyUI 安装对应自定义节点；
-  # turbo 工作流和综合模式两个新档位均不使用该节点。
+  # 采样加速（Spectrum Apply MiniMax H3）：非 turbo 的 H3 普通基模（首尾帧 fl2va、多模态参考 ref2va）
+  # 按键值挂载跳步节点，默认开启（需在 ComfyUI 安装 ComfyUI-Spectrum-MiniMax-H3）；
+  # 未装插件时请设为 false，工作流会自动移除该节点并直接回连模型加载器。
+  # turbo 蒸馏档与综合模式两个自带 Turbo 的基模均不使用该节点。
   spectrum_apply:
-    enabled: false
+    enabled: true
   # Turbo 蒸馏 Lora（lightx2v）：fl2v 档位（文/首帧/尾帧/首尾帧共享）与 ref2v 档位（多模态参考）。
   # 步数直接写入 BasicScheduler.steps（配合 MiniMaxH3SigmaShift 生成对应步数的 sigma 网格，不做跳步）；
   # shift 为官方 video/audio 训练偏移（8step: 12,3；fl2v 4step 768p: 6,3；ref2v 4step: 12,3）。
@@ -58,13 +60,14 @@ comfyui:
     ref2v_4step_lora: ""
     ref2v_4step_shift: "12,3"
   # 综合模式采样参数（参考图保真优先，两个档位均不挂 Spectrum）：
-  # 普通档（Non-Distilled）：推荐 res_multistep/simple 或 euler/simple，
-  #   Shift Video 10-12、Shift Audio 3-5；默认完整 25 步。
-  # 旧版动漫 turbo 加速（Distilled，前端可选开关）：固定 8 步直接采样，
-  #   分辨率跟随用户所选档位。
+  # 动画特调（Dasiwa V4 Turbo，蒸馏）：推荐 euler/simple 或 LCM/simple，
+  #   Shift Video 6-12、Shift Audio 3-5，4 或 8 步；默认 8 步直采。
+  #   distilled 表示基模自带 Turbo；若换成非蒸馏基模，设为 false 并把步数调回 20-25 步。
+  # 旧版动漫 turbo 档位（已被 V4 Turbo 取代）：仅在配置 hybrid_turbo_diffusion 时生效。
   hybrid:
-    steps: 25
-    sampler: "res_multistep"
+    distilled: true
+    steps: 8
+    sampler: "euler"
     scheduler: "simple"
     shift_video: 12
     shift_audio: 3

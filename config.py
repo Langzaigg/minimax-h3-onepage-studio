@@ -168,9 +168,10 @@ COMFYUI_TURBO_REF2V_4STEP_SHIFT = _setting(
 )
 
 # 混合基模（Dasiwa MiniMax H3 Hybrid）：一个模型同时覆盖 fl2v（文本/首尾帧）与 ref2v
-# （多模态参考）两种能力，作为独立的「混合生成」模式（hybrid_to_video）出现。
-#   hybrid_diffusion       → 20 步版本（Non-Distilled），配合采样加速节点跳步；
-#   hybrid_turbo_diffusion → 蒸馏版本（Distilled），4 / 8 步直接采样，不跳步。
+# （多模态参考）两种能力，作为独立的「综合」模式（hybrid_to_video）出现。
+#   hybrid_diffusion       → 动画特调所用的 Dasiwa 基模（当前为 V4 Turbo，蒸馏版）；
+#   hybrid_turbo_diffusion → 旧版 8 步 turbo 档位（已被 V4 Turbo 取代，留空即隐藏）；
+#   hybrid_nsfw_diffusion  → NSFW 特调所用的 Eros 基模。
 # 任一文件名留空即禁用对应档位（前端不渲染该模式/档位）。
 COMFYUI_HYBRID_MODEL = _setting(
     "comfyui.models.hybrid_diffusion",
@@ -188,16 +189,19 @@ COMFYUI_HYBRID_NSFW_MODEL = _setting(
 )
 HYBRID_ENABLED = bool(COMFYUI_HYBRID_MODEL or COMFYUI_HYBRID_NSFW_MODEL)
 HYBRID_TURBO_ENABLED = bool(COMFYUI_HYBRID_TURBO_MODEL)
-# 混合模式普通档（Non-Distilled）采样参数：
-# 推荐 res_multistep/simple 或 euler/simple，Shift Video 10-12，Shift Audio 3-5；
-# 默认固定 25 步，配合 Spectrum 加速节点跳步。
-HYBRID_STEPS = _setting("comfyui.hybrid.steps", "COMFYUI_HYBRID_STEPS", 25, int)
-HYBRID_SAMPLER = _setting("comfyui.hybrid.sampler", "COMFYUI_HYBRID_SAMPLER", "res_multistep")
+# 动画特调基模是否为蒸馏（内置 Turbo）版本：Dasiwa V4 Turbo 自带 Turbo，
+# 按下面的步数直接采样、不挂 Spectrum；换回 V2 等非蒸馏基模时设为 false，
+# 并同步把步数调回 20-25 步。
+HYBRID_DISTILLED = _setting("comfyui.hybrid.distilled", "COMFYUI_HYBRID_DISTILLED", True, bool)
+# 混合模式动画特调（Dasiwa V4 Turbo）采样参数：作者推荐 euler/simple 或 LCM/simple，
+# Shift Video 6-12、Shift Audio 3-5，蒸馏档 4 或 8 步；默认 8 步直采，不做跳步。
+HYBRID_STEPS = _setting("comfyui.hybrid.steps", "COMFYUI_HYBRID_STEPS", 8, int)
+HYBRID_SAMPLER = _setting("comfyui.hybrid.sampler", "COMFYUI_HYBRID_SAMPLER", "euler")
 HYBRID_SCHEDULER = _setting("comfyui.hybrid.scheduler", "COMFYUI_HYBRID_SCHEDULER", "simple")
 HYBRID_SHIFT_VIDEO = _setting("comfyui.hybrid.shift_video", "COMFYUI_HYBRID_SHIFT_VIDEO", 12.0, float)
 HYBRID_SHIFT_AUDIO = _setting("comfyui.hybrid.shift_audio", "COMFYUI_HYBRID_SHIFT_AUDIO", 3.0, float)
-# 混合模式 turbo 加速（Distilled，前端可选开关）：固定 8 步直接采样、不挂 Spectrum，
-# 分辨率档位不锁定，跟随用户所选档位。
+# 旧版混合 turbo 档位（仅 hybrid_turbo_diffusion 非空时生效）：固定 8 步直接采样、不挂 Spectrum，
+# 分辨率档位不锁定。该档位已被 V4 Turbo（走上面的 hybrid.* 参数）取代，保留以兼容旧配置。
 HYBRID_TURBO_STEPS = _setting("comfyui.hybrid.turbo_steps", "COMFYUI_HYBRID_TURBO_STEPS", 8, int)
 HYBRID_TURBO_SAMPLER = _setting(
     "comfyui.hybrid.turbo_sampler", "COMFYUI_HYBRID_TURBO_SAMPLER", "euler"

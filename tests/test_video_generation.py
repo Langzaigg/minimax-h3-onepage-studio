@@ -223,9 +223,9 @@ def test_resolve_nsfw_rejects_unknown_or_missing_presets(monkeypatch):
 
 def test_hybrid_full_workflow_preserves_complete_sampling(monkeypatch):
     """混合模式完整采样：UNET → SigmaShift → 调度器/引导器。"""
-    monkeypatch.setattr(video_generation, "COMFYUI_HYBRID_MODEL", "DasiwaMinimaxH3_dasiwaHybridV1.safetensors")
+    monkeypatch.setattr(video_generation, "COMFYUI_HYBRID_MODEL", "DasiwaMinimaxH3_dasiwaHybridV4Turbo_int8.safetensors")
     workflow = _workflow("hybrid_to_video", "prompt", 608, 352, 5, 123)
-    assert workflow["6"]["inputs"]["unet_name"] == "DasiwaMinimaxH3_dasiwaHybridV1.safetensors"
+    assert workflow["6"]["inputs"]["unet_name"] == "DasiwaMinimaxH3_dasiwaHybridV4Turbo_int8.safetensors"
     # Preset sampling is independent from the legacy global Spectrum switch.
     assert workflow["123"]["inputs"]["model"] == ["6", 0]
     assert "150" not in workflow
@@ -244,7 +244,8 @@ def test_hybrid_full_workflow_preserves_complete_sampling(monkeypatch):
 
 
 def test_hybrid_turbo_workflow_direct_steps_without_spectrum(monkeypatch):
-    """混合模式 turbo 加速（可选开关）：蒸馏基模固定 8 步直接采样，不挂 Spectrum。"""
+    """旧版混合 turbo 档位（非蒸馏动画基模搭配）：蒸馏基模固定 8 步直接采样，不挂 Spectrum。"""
+    monkeypatch.setattr(video_generation, "HYBRID_DISTILLED", False)
     monkeypatch.setattr(video_generation, "COMFYUI_HYBRID_TURBO_MODEL", "DasiwaMinimaxH3_dasiwaHybrid8turboV1.safetensors")
     assert video_generation.turbo_preset_ids("hybrid_to_video") == ["hybrid-turbo-8"]
     turbo = video_generation.resolve_turbo_preset("hybrid-turbo-8", "hybrid_to_video")
@@ -400,9 +401,11 @@ def test_turbo_presets_and_resolution_resolution():
 
 
 def test_hybrid_turbo_keeps_requested_resolution(monkeypatch):
-    """混合模式 turbo 加速不锁定分辨率：有效 MP 直接采用请求值。"""
+    """旧版混合 turbo 档位不锁定分辨率：有效 MP 直接采用请求值。"""
     from routers.video import resolve_resolution
 
+    # 旧版 turbo 档位只与「非蒸馏」动画基模搭配（V4 Turbo 自带 Turbo）。
+    monkeypatch.setattr(video_generation, "HYBRID_DISTILLED", False)
     monkeypatch.setattr(
         video_generation, "COMFYUI_HYBRID_TURBO_MODEL",
         "DasiwaMinimaxH3_dasiwaHybrid8turboV1.safetensors",

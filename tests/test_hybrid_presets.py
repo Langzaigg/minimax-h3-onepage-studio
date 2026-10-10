@@ -10,21 +10,24 @@ from services import video_generation as video
 
 @pytest.fixture(autouse=True)
 def installed_models(monkeypatch):
-    monkeypatch.setattr(video, "COMFYUI_HYBRID_MODEL", "DasiwaMinimaxH3_dasiwaHybridV2_int8.safetensors")
+    monkeypatch.setattr(
+        video, "COMFYUI_HYBRID_MODEL", "DasiwaMinimaxH3_dasiwaHybridV4Turbo_int8.safetensors"
+    )
     monkeypatch.setattr(video, "COMFYUI_HYBRID_NSFW_MODEL", "ErosMax_H3_beta5_Turbo_INT8.safetensors")
 
 
 def test_hybrid_model_choice_changes_sampling_without_extra_acceleration(monkeypatch):
     monkeypatch.setattr(video, "COMFYUI_SPECTRUM_ENABLED", True)
-    for choice, model, steps in (
-        ("anime", video.COMFYUI_HYBRID_MODEL, video.HYBRID_STEPS),
-        ("nsfw", video.COMFYUI_HYBRID_NSFW_MODEL, 8),
+    for choice, model, steps, sampler in (
+        # 动画特调 = Dasiwa V4 Turbo（蒸馏）：euler/simple 直采。
+        ("anime", video.COMFYUI_HYBRID_MODEL, video.HYBRID_STEPS, video.HYBRID_SAMPLER),
+        ("nsfw", video.COMFYUI_HYBRID_NSFW_MODEL, 8, "res_multistep"),
     ):
         workflow = video._workflow("hybrid_to_video", "A quiet moonlit castle", 768, 432, 5, 42,
                                    hybrid_preset=choice)
         assert workflow["6"]["inputs"]["unet_name"] == model
         assert workflow["9"]["inputs"]["steps"] == steps
-        assert workflow["17"]["inputs"]["sampler_name"] == "res_multistep"
+        assert workflow["17"]["inputs"]["sampler_name"] == sampler
         assert workflow["9"]["inputs"]["scheduler"] == "simple"
         assert workflow["16"]["class_type"] == "BasicGuider"
         assert "104" in workflow and "136" in workflow
@@ -32,10 +35,38 @@ def test_hybrid_model_choice_changes_sampling_without_extra_acceleration(monkeyp
                        or "Cache" in node["class_type"] for node in workflow.values())
 
 
-def test_eros_rejects_legacy_turbo_instead_of_silently_loading_anime():
-    with pytest.raises(ValueError, match="已内置 Turbo"):
-        video._workflow("hybrid_to_video", "A quiet moonlit castle", 768, 432, 5, 42,
-                        hybrid_preset="nsfw", turbo={"diffusion": "old_anime_turbo.safetensors"})
+def test_hybrid_distilled_flag_follows_the_configured_checkpoint(monkeypatch):
+    """comfyui.hybrid.distilled 描述动画特调基模是否自带 Turbo：
+    蒸馏档（V4 Turbo）走无 Spectrum 的 turbo 模板；非蒸馏档（旧 V2 一类）走普通模板。
+    两种情况都不挂 Spectrum，也不叠加任何 LoRA。"""
+    monkeypatch.setattr(video, "HYBRID_DISTILLED", True)
+    monkeypatch.setattr(video, "HYBRID_STEPS", 8)
+    distilled = video._workflow("hybrid_to_video", "prompt", 768, 432, 5, 7, hybrid_preset="anime")
+    assert distilled["9"]["inputs"]["steps"] == 8
+    assert distilled["123"]["inputs"]["model"] == ["6", 0]
+    assert distilled["9"]["inputs"]["model"] == ["123", 0]
+    assert "150" not in distilled
+
+    monkeypatch.setattr(video, "HYBRID_DISTILLED", False)
+    monkeypatch.setattr(video, "HYBRID_STEPS", 25)
+    plain = video._workflow("hybrid_to_video", "prompt", 768, 432, 5, 7, hybrid_preset="anime")
+    assert plain["9"]["inputs"]["steps"] == 25
+    assert plain["9"]["inputs"]["model"] == ["123", 0]
+    assert "150" not in plain
+
+    # 蒸馏档位下旧版 turbo 基模不再作为可选档位出现（配置了也不提供）。
+    monkeypatch.setattr(video, "COMFYUI_HYBRID_TURBO_MODEL", "legacy-hybrid-turbo.safetensors")
+    monkeypatch.setattr(video, "HYBRID_DISTILLED", True)
+    assert video.turbo_preset_ids("hybrid_to_video") == []
+
+
+def test_distilled_presets_reject_legacy_turbo_checkpoint():
+    """自带 Turbo 的档位（V4 Turbo / Eros）不得再叠加旧版 turbo 基模。"""
+    legacy_turbo = {"diffusion": "old_anime_turbo.safetensors"}
+    for choice in ("nsfw", "anime"):
+        with pytest.raises(ValueError, match="已内置 Turbo"):
+            video._workflow("hybrid_to_video", "A quiet moonlit castle", 768, 432, 5, 42,
+                            hybrid_preset=choice, turbo=legacy_turbo)
     with pytest.raises(ValueError, match="未配置"):
         video.resolve_hybrid_preset("unknown")
 

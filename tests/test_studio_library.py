@@ -35,7 +35,7 @@ def video_record(owner="alice", prompt="Video", created=None):
     record = videos.create_task_record(mode="hybrid_to_video", prompt=prompt, duration=8,
         width=1024, height=576, resolution_megapixels=.5, aspect_ratio="16:9",
         seed=2**63-1, warnings=[], owner=owner,
-        extras={"hybrid_preset": "anime", "hybrid_model": "DasiwaMinimaxH3_dasiwaHybridV2_int8.safetensors"})
+        extras={"hybrid_preset": "anime", "hybrid_model": "DasiwaMinimaxH3_dasiwaHybridV4Turbo_int8.safetensors"})
     record["status"] = "completed"
     if created:
         record["created_at"] = created

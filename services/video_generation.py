@@ -40,6 +40,7 @@ from config import (
     COMFYUI_VIDEO_VAE,
     FFMPEG_PATH,
     HYBRID_ENABLED,
+    HYBRID_DISTILLED,
     HYBRID_NSFW_SAMPLER,
     HYBRID_NSFW_SCHEDULER,
     HYBRID_NSFW_SHIFT_AUDIO,
@@ -444,7 +445,7 @@ _NSFW_GUIDE_TEXT = (
 
 
 def _hybrid_polish_system(guide: str, ref_mode: bool = False) -> str:
-    """混合生成模式（Dasiwa Hybrid，动漫偏向）专属润色系统提示词。
+    """综合模式（Dasiwa Hybrid V4 Turbo，动漫偏向）专属润色系统提示词。
 
     混合专属内容独立成文，NSFW 内容按全局开关以拼接方式追加：
     1) 混合参考理解（专属）—— 首尾帧关键帧锚定开场/收尾镜头，多模态参考媒体定义
@@ -463,7 +464,8 @@ def _hybrid_polish_system(guide: str, ref_mode: bool = False) -> str:
         else "Write one continuous prompt without section headers."
     )
     system = (
-        "You are a professional MiniMax H3 prompt editor for the Dasiwa Hybrid base model. "
+        "You are a professional MiniMax H3 prompt editor for the DaSiWa Hybrid V4 Turbo "
+        "anime base model. "
         "Rewrite the user's idea in English as a production-ready audiovisual generation prompt. "
         f"{task}\n"
         "\n"
@@ -477,10 +479,13 @@ def _hybrid_polish_system(guide: str, ref_mode: bool = False) -> str:
         "as assets.\n"
         "- Blend the keyframe and reference constraints into one seamless prompt.\n"
         "\n"
-        "ANIME-LEANING ART DIRECTION - default to anime/2D stylized output: cel shading, clean "
-        "line art, expressive character acting, vivid yet harmonious palette, and cinematic anime "
-        "camera language (push-ins, parallax, dramatic silhouettes, atmospheric light). If the "
-        "user explicitly requests another art style, follow the user.\n"
+        "ANIME-LEANING ART DIRECTION - the target checkpoint is anime-specialized, so lead with "
+        "2D craft: cel shading, clean line art, expressive character acting, painted backgrounds, "
+        "a vivid yet harmonious palette, and cinematic anime camera language (push-ins, parallax, "
+        "dramatic silhouettes, atmospheric light). It is a distilled Turbo checkpoint, so prefer "
+        "one coherent take with concrete, physically readable motion beats over long stacks of "
+        "conflicting modifiers. If the user explicitly requests another art style, follow the "
+        "user.\n"
         "\n"
         "OUTPUT - Preserve user-provided dialogue and visible text verbatim. Return only the final "
         "prompt, with no code fence or commentary."
@@ -909,13 +914,13 @@ if COMFYUI_TURBO_REF2V_4STEP_LORA:
             "shift_video": _shift[0], "shift_audio": _shift[1],
         }
 
-# 混合生成模式（Dasiwa Hybrid）turbo 加速：前端可选开关（类似 NSFW 模式选项），
-# 开启后直接换蒸馏基模（hybrid_turbo_diffusion）固定 8 步采样、不挂 LoRA；
-# 不锁定分辨率（megapixels 跟随用户所选档位，由接口层直接采用请求值）。
+# 混合模式旧版 turbo 档位（hybrid_turbo_diffusion，已被 V4 Turbo 取代）：
+# 前端可选开关，开启后换成旧版蒸馏基模固定 8 步采样、不挂 LoRA；不锁定分辨率。
+# 动画特调本身为蒸馏基模（distilled）时该档位不再提供——接口对 hybrid-turbo-* 返回 400。
 def _hybrid_turbo_presets() -> dict[str, dict[str, Any]]:
     # Resolve from the current optional model choice, rather than an import-time
     # snapshot that can remain empty after the legacy checkpoint is configured.
-    if not COMFYUI_HYBRID_TURBO_MODEL:
+    if not COMFYUI_HYBRID_TURBO_MODEL or HYBRID_DISTILLED:
         return {}
     return {f"hybrid-turbo-{HYBRID_TURBO_STEPS}": {
         "diffusion": COMFYUI_HYBRID_TURBO_MODEL, "steps": HYBRID_TURBO_STEPS,
@@ -928,11 +933,11 @@ def hybrid_presets() -> list[dict[str, Any]]:
     """Public model choices. The legacy NSFW flag never selects a checkpoint."""
     choices = [
         {
-            "id": "anime", "label": "动画特调 · DaSiWa Hybrid v2",
+            "id": "anime", "label": "动画特调 · DaSiWa Hybrid V4 Turbo",
             "model": COMFYUI_HYBRID_MODEL, "steps": HYBRID_STEPS,
             "sampler": HYBRID_SAMPLER, "scheduler": HYBRID_SCHEDULER,
             "shift_video": HYBRID_SHIFT_VIDEO, "shift_audio": HYBRID_SHIFT_AUDIO,
-            "distilled": False, "cfg": 1.0, "spectrum_enabled": False,
+            "distilled": HYBRID_DISTILLED, "cfg": 1.0, "spectrum_enabled": False,
         },
         {
             "id": "nsfw", "label": "NSFW 特调 · Eros Max beta5",
@@ -1074,11 +1079,12 @@ def _workflow(
     if turbo and loras:
         raise ValueError("NSFW LoRA 与 turbo 加速不能同时使用")
     if mode == "hybrid_to_video":
-        # Both checkpoints support keyframes and multimodal references. Eros has
-        # Turbo baked in; never swap it for the legacy Dasiwa Turbo model.
+        # Both checkpoints support keyframes and multimodal references. Eros ships Turbo
+        # deltas; Dasiwa V4 Turbo is itself a distilled checkpoint. Neither should be
+        # combined with the legacy hybrid Turbo dropdown.
         preset = resolve_hybrid_preset(hybrid_preset)
         if preset["distilled"] and turbo:
-            raise ValueError("Eros Max beta5 已内置 Turbo，请取消额外 Turbo 档位")
+            raise ValueError(f"{preset['label']} 已内置 Turbo，请取消额外 Turbo 档位")
         sampling = turbo or preset
         # conditioning 节点在运行时二选一：有参考素材 → 136（ReferenceToVideo），
         # 否则 → 104（ImageToVideo，含首尾帧）；模板同时定义两者，_run_generation 裁剪。

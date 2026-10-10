@@ -80,7 +80,7 @@ dialog{color:var(--ink);background:var(--card);border:1px solid var(--line);widt
       <button class="mode" data-mode="text_frames" title="纯文本，或附首帧/末帧生成视频">首尾帧 <small>FL2V</small></button>
       <button class="mode" data-mode="full_reference" title="多图片、视频和音频共同参考">多模态参考 <small>Ref2V</small></button>
     </div>
-    <div id="hybrid-preset-wrap"><div class="preset-row"><label for="hybrid-preset">模型风格</label><select id="hybrid-preset"><option value="anime">动画特调 · Dasiwa Hybrid V2</option><option value="nsfw">NSFW 特调 · Eros Max</option></select></div><p class="preset-description hidden" id="hybrid-preset-hint"></p></div>
+    <div id="hybrid-preset-wrap"><div class="preset-row"><label for="hybrid-preset">模型风格</label><select id="hybrid-preset"><option value="anime">动画特调 · Dasiwa Hybrid V4 Turbo</option><option value="nsfw">NSFW 特调 · Eros Max</option></select></div><p class="preset-description hidden" id="hybrid-preset-hint"></p></div>
     <div id="full-reference-section">
       <div class="file-box mixed-reference-box"><div class="mixed-reference-head"><label>参考素材</label></div><p>最多 9 张图片 / 3 个视频 / 3 段音频</p><div class="mixed-reference-input" id="reference-drop"><div class="reference-drop-copy"><strong>添加参考素材</strong><span>图片 / 视频 / 音频</span></div><input id="reference-files" aria-label="上传参考图片、视频或音频" type="file" accept="image/*,video/*,audio/*" multiple></div>
       <div class="reference-groups hidden" id="reference-groups">
@@ -229,8 +229,8 @@ dialog{color:var(--ink);background:var(--card);border:1px solid var(--line);widt
   function nsfwBlocksTurbo(){return !!selectedNsfw()}
   function renderNsfw(){const options=nsfwOptions(),sel=$('nsfw'),prev=sel.value;sel.innerHTML='<option value="off">关闭</option>'+options.map(p=>`<option value="${p.id}">${p.label}</option>`).join('');sel.value=options.some(p=>p.id===prev)?prev:'off'}
   function syncNsfwUi(){const available=nsfwAvailable();$('nsfw-inline').classList.toggle('hidden',!available);const hint=$('nsfw-hint');if(available)renderNsfw();hint.textContent='NSFW LoRA 仅普通档位可用（不兼容 turbo）';hint.classList.toggle('hidden',!available||!nsfwOn());syncHybridTurboUi()}
-  // 混合模式 Turbo 加速：可选下拉（类似 NSFW 模式选项）。关闭 → 普通档固定 25 步 + Spectrum
-  // 跳步加速；开启 → 蒸馏基模固定步数直采（默认 8 步），分辨率档位仍自由选择。
+  // 混合模式 Turbo 加速：旧版 turbo 基模的可选下拉（已被 V4 Turbo 取代，未配置模型时不显示）。
+  // 动画特调（V4 Turbo）与 Eros 均自带 Turbo，按各自步数直采；分辨率档位始终自由选择。
   function syncHybridTurboUi(){const sel=$('hybrid-turbo'),prev=sel.value,ids=turboPresets.hybrid||[];sel.innerHTML='<option value="off">关闭</option>'+ids.map(id=>`<option value="${id}">开启</option>`).join('');if([...sel.options].some(o=>o.value===prev))sel.value=prev;$('hybrid-turbo-inline').classList.toggle('hidden',mode!=='hybrid'||!ids.length||$('hybrid-preset').value==='nsfw')}
   $('hybrid-turbo').onchange=()=>{syncHybridTurboUi();customizeSourceResolution();updateWarnings()};
   $('nsfw').onchange=()=>{syncNsfwUi();renderResolution(true);updateWarnings()};

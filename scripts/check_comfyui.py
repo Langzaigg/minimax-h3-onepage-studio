@@ -72,7 +72,7 @@ REQUIRED_MODELS = {
 }
 # Lora 位于 ComfyUI models/loras 目录：turbo 蒸馏 lora 与全部 NSFW 档位 lora。
 REQUIRED_MODELS["loras"] = set(TURBO_LORAS) | NSFW_LORAS
-# 混合生成基模（Dasiwa Hybrid）：普通档 Non-Distilled（25 步）与 turbo Distilled 各一个，
+# 综合模式基模：动画特调（Dasiwa V4 Turbo，蒸馏）与 NSFW 特调（Eros）、旧版 turbo 各一个，
 # 与常规模型同在 diffusion_models；配置了哪个就校验哪个。
 if COMFYUI_HYBRID_MODEL:
     REQUIRED_MODELS["diffusion_models"].add(COMFYUI_HYBRID_MODEL)
@@ -80,7 +80,7 @@ if COMFYUI_HYBRID_NSFW_MODEL:
     REQUIRED_MODELS["diffusion_models"].add(COMFYUI_HYBRID_NSFW_MODEL)
 if COMFYUI_HYBRID_TURBO_MODEL:
     REQUIRED_MODELS["diffusion_models"].add(COMFYUI_HYBRID_TURBO_MODEL)
-# 综合模式的 Dasiwa V2 / Eros 不挂 Spectrum。
+# 综合模式的 Dasiwa V4 Turbo / Eros 均不挂 Spectrum。
 # 混合模式 turbo 工作流需要 SigmaShift 节点（蒸馏档位重建 sigma 网格）。
 if COMFYUI_HYBRID_TURBO_MODEL:
     REQUIRED_NODES.add("MiniMaxH3SigmaShift")

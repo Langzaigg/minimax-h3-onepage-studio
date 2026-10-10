@@ -38,7 +38,7 @@ LTX_STAGE_2_SIGMAS = "0.909375, 0.725, 0.421875, 0.0"
 WORKFLOW_REVISIONS = {"ltx25_pixel_2stage": 2, "redgraft_pixel_2stage": 2,
                       "ltx25_msr": 3, "redgraft_msr": 3, "dlss_nr": 2}
 MODEL_DEFAULTS = {
-    "h3_model": "DasiwaMinimaxH3_dasiwaHybridV2_int8.safetensors",
+    "h3_model": "DasiwaMinimaxH3_dasiwaHybridV4Turbo_int8.safetensors",
     "h3_clip": "qwen3vl_32b_minimax_h3_int8_convrot.safetensors",
     "h3_video_vae": "minimax_h3_video_vae_fp16.safetensors",
     "h3_audio_vae": "minimax_h3_audio_vae_fp32.safetensors",
